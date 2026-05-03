@@ -8,7 +8,7 @@ python mu_mimo_ofdm_downlink_dataset.py \
   --distance-sweep 10 30 50 100 200 300 \
   --frames 50 \
   --ofdm-symbols 8 \
-  --modulation QPSK \
+  --modulation 16QAM \
   --dataset-users 16 \
   --dataset-frames-per-distance 4 \
   --max-json-records 60000 \
@@ -56,7 +56,7 @@ python mu_mimo_ofdm_downlink_dataset.py \
 - stream: UE당 1 spatial stream
 - 최대 동시 stream: 8개
 - OFDM: 64 FFT, CP 16, data subcarrier 52개
-- 기본 변조: QPSK
+- 기본 변조: 16QAM
 - precoding: perfect CSI 기반 downlink ZF
 - 수신: perfect CSI 기반 combiner와 desired gain equalization
 

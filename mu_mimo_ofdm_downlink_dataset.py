@@ -75,7 +75,7 @@ class SystemConfig:
     shadowing_std_db: float = 6.0
 
     # 변조
-    modulation: str = "QPSK"      # "BPSK", "QPSK", "16QAM"
+    modulation: str = "16QAM"      # "BPSK", "QPSK", "16QAM"
 
     # 반복
     n_frames: int = 50
@@ -1023,7 +1023,7 @@ def parse_args() -> argparse.Namespace:
                         help="거리 하나당 frame 반복 수")
     parser.add_argument("--ofdm-symbols", type=int, default=8,
                         help="frame 하나당 OFDM symbol 수")
-    parser.add_argument("--modulation", type=str, default="QPSK",
+    parser.add_argument("--modulation", type=str, default="16QAM",
                         choices=["BPSK", "QPSK", "16QAM"],
                         help="변조 방식")
     parser.add_argument("--dataset-users", type=int, default=16,
