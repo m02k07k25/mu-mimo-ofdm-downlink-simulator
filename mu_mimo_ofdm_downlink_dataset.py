@@ -8,7 +8,9 @@
 
 채널은 다중경로 Rayleigh fading에 5 GHz 도심 소형셀 링크버짓을 결합한다.
 거리 기반 path loss, log-normal shadowing, kTB thermal AWGN을 사용하므로
-거리가 멀어질수록 수신 전력과 measured SNR이 낮아진다.
+거리가 멀어질수록 수신 전력과 pre-combiner SNR이 낮아진다.
+수신부는 perfect CSI 기반으로 OFDM/MIMO/equalization을 전통적으로 처리하고,
+AI 학습용 feature에는 equalized symbol x_hat 중심의 detector 입력을 저장한다.
 
 JSON label은 실제 무선 채널로 보내는 것이 아니라 supervised learning
 데이터셋 생성을 위해 저장하는 시뮬레이션 정답이다.
@@ -73,14 +75,14 @@ class SystemConfig:
     shadowing_std_db: float = 6.0
 
     # 변조
-    modulation: str = "16QAM"      # "BPSK", "QPSK", "16QAM"
+    modulation: str = "QPSK"      # "BPSK", "QPSK", "16QAM"
 
     # 반복
-    n_frames: int = 5
-    random_seed: int = 7
+    n_frames: int = 50
+    random_seed: int = 42
 
     # JSONL 저장 제한
-    max_json_records: int = 5000
+    max_json_records: int = 60000
 
     @property
     def n_data_subcarriers(self) -> int:
@@ -521,8 +523,8 @@ def make_dataset_record(
     path_loss_db_value: float,
     shadowing_db: float,
     rx_power_dbm: float,
-    noise_power_dbm: float,
-    measured_snr_db: float,
+    noise_power_true_dbm: float,
+    pre_combiner_snr_db: float,
     user_id: int,
     active_users: Sequence[int],
     stream_position: int,
@@ -533,6 +535,8 @@ def make_dataset_record(
     W: np.ndarray,
     combiner: np.ndarray,
     desired_gain: complex,
+    y_scalar: complex,
+    x_hat: complex,
     tx_symbol: complex,
     tx_bits: np.ndarray,
 ) -> Dict:
@@ -555,21 +559,15 @@ def make_dataset_record(
     bps = bits_per_symbol(cfg.modulation)
 
     feature_vector = (
-        complex_array_to_feature(rx_vector)
-        + complex_array_to_feature(H_user_k)
-        + complex_array_to_feature(W_pad)
-        + complex_array_to_feature(combiner)
-        + complex_array_to_feature(intended_precoder)
+        complex_array_to_feature(np.array([x_hat]))
         + complex_array_to_feature(np.array([desired_gain]))
+        + complex_array_to_feature(np.array([y_scalar]))
         + [
-            float(distance_m),
-            float(path_loss_db_value),
-            float(shadowing_db),
-            float(rx_power_dbm),
-            float(noise_power_dbm),
-            float(measured_snr_db),
+            float(abs(desired_gain)),
+            float(np.angle(desired_gain)),
+            float(noise_power_true_dbm),
+            float(pre_combiner_snr_db),
         ]
-        + [float(x) for x in active_mask]
     )
 
     return {
@@ -579,8 +577,8 @@ def make_dataset_record(
             "path_loss_db": float(path_loss_db_value),
             "shadowing_db": float(shadowing_db),
             "rx_power_dbm": float(rx_power_dbm),
-            "noise_power_dbm": float(noise_power_dbm),
-            "measured_snr_db": float(measured_snr_db),
+            "noise_power_true_dbm": float(noise_power_true_dbm),
+            "pre_combiner_snr_db": float(pre_combiner_snr_db),
             "user_id": int(user_id),
             "active_users": [int(x) for x in active_users],
             "active_users_padded": active_users_padded,
@@ -599,20 +597,14 @@ def make_dataset_record(
 
             # 아래 항목들은 디버깅과 해석용이다.
             # 실제 학습에서는 feature_vector만 써도 된다.
+            "equalized_symbol_x_hat": complex_to_pair(x_hat),
+            "y_scalar": complex_to_pair(y_scalar),
             "rx_vector_4rx": complex_array_to_pairs(rx_vector),
             "channel_H_4x8": complex_array_to_pairs(H_user_k),
             "precoder_W_padded_8x8": complex_array_to_pairs(W_pad),
             "rx_combiner_4": complex_array_to_pairs(combiner),
             "intended_precoder_8": complex_array_to_pairs(intended_precoder),
             "desired_gain": complex_to_pair(desired_gain),
-            "link_budget": {
-                "distance_m": float(distance_m),
-                "path_loss_db": float(path_loss_db_value),
-                "shadowing_db": float(shadowing_db),
-                "rx_power_dbm": float(rx_power_dbm),
-                "noise_power_dbm": float(noise_power_dbm),
-                "measured_snr_db": float(measured_snr_db),
-            },
         },
         "label": {
             "tx_bits": np.asarray(tx_bits, dtype=int).reshape(-1).tolist(),
@@ -624,16 +616,11 @@ def make_dataset_record(
 
 def dataset_schema(cfg: SystemConfig) -> Dict:
     """JSONL 데이터셋의 입출력 구조 설명"""
-    dummy_active_mask_len = cfg.max_streams
     feature_dim = (
-        2 * cfg.n_rx_per_ue              # rx_vector
-        + 2 * cfg.n_rx_per_ue * cfg.n_tx # H_user_k
-        + 2 * cfg.n_tx * cfg.max_streams # W_pad
-        + 2 * cfg.n_rx_per_ue            # combiner
-        + 2 * cfg.n_tx                   # intended_precoder
-        + 2                              # desired_gain
-        + 6                              # link-budget scalars
-        + dummy_active_mask_len          # active_mask
+        2  # equalized_symbol_x_hat
+        + 2  # desired_gain
+        + 2  # y_scalar
+        + 4  # gain_abs, gain_phase, noise_power_true_dbm, pre_combiner_snr_db
     )
 
     return {
@@ -641,19 +628,18 @@ def dataset_schema(cfg: SystemConfig) -> Dict:
         "one_line": "one received subcarrier sample for one scheduled user",
         "feature_dim": feature_dim,
         "input_feature_order": [
-            "rx_vector_4rx: real flatten then imag flatten",
-            "channel_H_4x8: real flatten then imag flatten",
-            "precoder_W_padded_8x8: real flatten then imag flatten",
-            "rx_combiner_4: real flatten then imag flatten",
-            "intended_precoder_8: real flatten then imag flatten",
+            "equalized_symbol_x_hat: real, imag",
             "desired_gain: real, imag",
-            "distance_m",
-            "path_loss_db",
-            "shadowing_db",
-            "rx_power_dbm",
-            "noise_power_dbm",
-            "measured_snr_db",
-            "active_mask length 8",
+            "y_scalar: real, imag",
+            "desired_gain_abs",
+            "desired_gain_phase_rad",
+            "noise_power_true_dbm",
+            "pre_combiner_snr_db",
+        ],
+        "meta_notes": [
+            "This is a perfect-CSI detector dataset: OFDM, MIMO combining, and equalization are done by the conventional receiver first.",
+            "channel_H_4x8, rx_combiner_4, and desired_gain are debug fields. The compact feature_vector is centered on x_hat.",
+            "pre_combiner_snr_db is based on pre-combiner received power and estimated noise; it is not post-equalizer SINR.",
         ],
         "label": {
             "tx_bits": f"{bits_per_symbol(cfg.modulation)} bits per symbol",
@@ -766,18 +752,18 @@ def simulate_downlink_frame(
     # --------------------------------------------------------
     rx_freq_all_users: List[np.ndarray] = []
     rx_power_dbm_per_user: List[float] = []
-    measured_snr_db_per_user: List[float] = []
+    pre_combiner_snr_db_per_user: List[float] = []
     noise_power_w = thermal_noise_power_watts(cfg)
-    noise_power_dbm = float(watts_to_dbm(noise_power_w))
+    noise_power_true_dbm = float(watts_to_dbm(noise_power_w))
 
     for user_id in range(n_users):
         y_clean = apply_channel_one_user(tx_serial, h_time[user_id])
         rx_power_w = float(np.mean(np.abs(y_clean) ** 2))
         rx_power_dbm = float(watts_to_dbm(rx_power_w))
-        measured_snr_db = float(linear_to_db(rx_power_w / max(noise_power_w, 1e-300)))
         y_noisy, _ = add_thermal_awgn(y_clean, cfg, rng)
+        pre_combiner_snr_db = float(linear_to_db(rx_power_w / max(noise_power_w, 1e-300)))
         rx_power_dbm_per_user.append(rx_power_dbm)
-        measured_snr_db_per_user.append(measured_snr_db)
+        pre_combiner_snr_db_per_user.append(pre_combiner_snr_db)
 
         rx_blocks = y_noisy.reshape(cfg.n_ofdm_symbols, cfg.n_fft + cfg.n_cp, cfg.n_rx_per_ue)
         rx_freq = ofdm_demodulate(rx_blocks, cfg)
@@ -811,7 +797,7 @@ def simulate_downlink_frame(
                 # 4Rx -> 1개 scalar stream
                 y_scalar = combiner.conj().T @ y_vec
 
-                # 원하는 stream의 effective channel gain
+                # perfect CSI로 계산한 원하는 stream의 effective channel gain
                 desired_gain = tx_scale * (combiner.conj().T @ H_user_k @ W[:, stream_position])
 
                 # gain equalization
@@ -833,8 +819,8 @@ def simulate_downlink_frame(
                             path_loss_db_value=link_metrics["path_loss_db"][user_id],
                             shadowing_db=link_metrics["shadowing_db"][user_id],
                             rx_power_dbm=rx_power_dbm_per_user[user_id],
-                            noise_power_dbm=noise_power_dbm,
-                            measured_snr_db=measured_snr_db_per_user[user_id],
+                            noise_power_true_dbm=noise_power_true_dbm,
+                            pre_combiner_snr_db=pre_combiner_snr_db_per_user[user_id],
                             user_id=user_id,
                             active_users=active_users,
                             stream_position=stream_position,
@@ -845,6 +831,8 @@ def simulate_downlink_frame(
                             W=W,
                             combiner=combiner,
                             desired_gain=desired_gain,
+                            y_scalar=y_scalar,
+                            x_hat=x_hat,
                             tx_symbol=tx_symbols[user_id, data_pos, t],
                             tx_bits=bits_true,
                         )
@@ -903,16 +891,27 @@ def write_jsonl_dataset(
     distance_sweep_m: Sequence[float],
     frames_per_distance: int,
     max_records: int,
+    records_per_distance: Optional[int] = None,
 ) -> int:
-    """딥러닝 equalizer 학습용 JSONL 파일을 생성한다."""
+    """딥러닝 equalizer 학습용 JSONL 파일을 거리별 균등 quota로 생성한다."""
     rng = np.random.default_rng(cfg.random_seed + 9999)
     written = 0
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    distances = [float(x) for x in distance_sweep_m]
+    if not distances:
+        return 0
+
+    if records_per_distance is None:
+        quota_per_distance = max(int(max_records), 0) // len(distances)
+    else:
+        quota_per_distance = max(int(records_per_distance), 0)
 
     with output_path.open("w", encoding="utf-8") as f:
-        for distance_m in distance_sweep_m:
+        for distance_m in distances:
+            distance_written = 0
             for frame_id in range(frames_per_distance):
-                if written >= max_records:
+                remaining_for_distance = quota_per_distance - distance_written
+                if remaining_for_distance <= 0:
                     break
 
                 _, _, records = simulate_downlink_frame(
@@ -922,15 +921,13 @@ def write_jsonl_dataset(
                     rng=rng,
                     frame_id=frame_id,
                     collect_json_records=True,
-                    max_records=max_records - written,
+                    max_records=remaining_for_distance,
                 )
 
                 for rec in records:
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 written += len(records)
-
-            if written >= max_records:
-                break
+                distance_written += len(records)
 
     return written
 
@@ -990,19 +987,17 @@ def print_flow() -> None:
         "3. 기지국에서 사용자별 랜덤 비트 생성",
         "4. 비트를 BPSK/QPSK/16QAM 심볼로 변조",
         "5. 단말 수가 8명을 넘으면 사용자 그룹으로 분할",
-        "6. 각 부반송파에서 단말별 4x8 채널 H 계산",
-        "7. 단말 4Rx 채널을 SVD combiner로 1-stream 유효 채널로 변환",
-        "8. 기지국에서 active user 유효 채널을 모아 ZF precoder 계산",
-        "9. 변조 심볼을 precoder에 곱해 8Tx 주파수 격자 생성",
-        "10. OFDM IFFT와 Cyclic Prefix 삽입",
-        "11. 전체 8Tx 평균 전력을 링크버짓 송신 전력으로 정규화",
-        "12. 8Tx 신호가 각 단말의 4Rx 채널을 통과",
-        "13. kTB와 receiver noise figure 기반 thermal AWGN 추가",
-        "14. 수신단에서 CP 제거 후 FFT",
-        "15. 4Rx 수신 벡터에 combiner 적용",
-        "16. desired gain으로 equalization",
-        "17. hard demodulation 후 BER 계산",
-        "18. 딥러닝 학습용 JSONL에 입력 feature와 정답 label 저장",
+        "6. perfect CSI 기반으로 BS ZF precoder 계산",
+        "7. 변조 심볼을 precoder에 곱해 8Tx 주파수 격자 생성",
+        "8. OFDM IFFT와 Cyclic Prefix 삽입",
+        "9. 전체 8Tx 평균 전력을 링크버짓 송신 전력으로 정규화",
+        "10. 8Tx 신호가 각 단말의 4Rx 채널을 통과",
+        "11. kTB와 receiver noise figure 기반 thermal AWGN 추가",
+        "12. 수신단에서 CP 제거 후 FFT",
+        "13. perfect CSI combiner 적용",
+        "14. perfect CSI desired gain으로 equalization",
+        "15. hard demodulation 후 BER 계산",
+        "16. AI detector 학습용 x_hat feature와 정답 label 저장",
     ]
 
     print("\n===== 송수신 End-to-End 순서 =====")
@@ -1024,7 +1019,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distance-sweep", nargs="+", type=float,
                         default=[10, 30, 50, 100, 200, 300],
                         help="BER 실험용 거리[m] 목록")
-    parser.add_argument("--frames", type=int, default=5,
+    parser.add_argument("--frames", type=int, default=50,
                         help="거리 하나당 frame 반복 수")
     parser.add_argument("--ofdm-symbols", type=int, default=8,
                         help="frame 하나당 OFDM symbol 수")
@@ -1033,10 +1028,12 @@ def parse_args() -> argparse.Namespace:
                         help="변조 방식")
     parser.add_argument("--dataset-users", type=int, default=16,
                         help="JSONL 데이터셋 생성 시 사용할 단말 수")
-    parser.add_argument("--dataset-frames-per-distance", type=int, default=2,
+    parser.add_argument("--dataset-frames-per-distance", type=int, default=4,
                         help="JSONL 데이터셋 생성용 거리당 frame 수")
-    parser.add_argument("--max-json-records", type=int, default=5000,
+    parser.add_argument("--max-json-records", type=int, default=60000,
                         help="JSONL에 저장할 최대 record 수")
+    parser.add_argument("--records-per-distance", type=int, default=None,
+                        help="거리별 JSONL record 저장량. 지정하면 max-json-records보다 우선한다.")
     parser.add_argument("--carrier-freq-ghz", type=float, default=5.0,
                         help="carrier frequency [GHz]")
     parser.add_argument("--bandwidth-hz", type=float, default=20e6,
@@ -1128,6 +1125,7 @@ def main() -> None:
         distance_sweep_m=args.distance_sweep,
         frames_per_distance=args.dataset_frames_per_distance,
         max_records=args.max_json_records,
+        records_per_distance=args.records_per_distance,
     )
     print(f"[저장] JSONL 데이터셋: {dataset_path} ({n_written} records)")
     print("[완료] label은 실제 송신 신호가 아니라 시뮬레이션용 정답으로 저장된 값이다.")
