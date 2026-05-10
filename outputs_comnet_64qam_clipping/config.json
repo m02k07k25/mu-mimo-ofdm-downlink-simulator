@@ -1,0 +1,26 @@
+{
+  "n_fft": 64,
+  "n_cp": 16,
+  "modulation": "64QAM",
+  "n_taps": 8,
+  "pdp_decay": 2.0,
+  "snr_train_db": 40.0,
+  "snr_test_db": [
+    0,
+    5,
+    10,
+    15,
+    20,
+    25,
+    30,
+    35,
+    40
+  ],
+  "n_train_frames": 50000,
+  "n_val_frames": 10000,
+  "n_test_frames_per_snr": 10000,
+  "case": "clipping",
+  "clip_ratio": 1.6,
+  "seed": 7,
+  "nonlinear_processing": "time-domain OFDM symbol is clipped before cyclic prefix insertion"
+}
