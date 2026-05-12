@@ -26,6 +26,9 @@ class MuMimoE2EConfig:
     n_val_frames: int = 10000
     n_test_frames_per_snr: int = 10000
     csit_error_var: float = 0.0
+    case: str = "clipping"
+    clip_ratio: float = 1.6
+    pilot_kind: str = "qpsk"
     seed: int = 7
 
     @property
@@ -39,8 +42,8 @@ class MuMimoE2EConfig:
             raise ValueError("n_cp must be non-negative")
         if self.n_taps <= 0:
             raise ValueError("n_taps must be positive")
-        if self.n_taps > self.n_cp:
-            raise ValueError("MU-MIMO OFDM requires n_taps <= n_cp")
+        if self.n_taps > self.n_cp and self.case in {"linear", "clipping"}:
+            raise ValueError(f"{self.case} MU-MIMO OFDM requires n_taps <= n_cp")
         if self.pdp_decay <= 0:
             raise ValueError("pdp_decay must be positive")
         if self.modulation.upper() not in {"16QAM", "64QAM"}:
@@ -51,6 +54,12 @@ class MuMimoE2EConfig:
             raise ValueError("n_rx_per_ue must be positive")
         if self.csit_error_var < 0.0:
             raise ValueError("csit_error_var must be non-negative")
+        if self.case not in {"linear", "cp_removal", "clipping"}:
+            raise ValueError("case must be one of linear, cp_removal, clipping")
+        if self.clip_ratio <= 0.0:
+            raise ValueError("clip_ratio must be positive")
+        if self.pilot_kind not in {"ones", "qpsk"}:
+            raise ValueError("pilot_kind must be one of ones, qpsk")
         if min(self.n_train_frames, self.n_val_frames, self.n_test_frames_per_snr) < 0:
             raise ValueError("frame counts must be non-negative")
 
@@ -84,6 +93,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Complex CSIT error variance E[|E|^2] for H_tx_est = H_true + E.",
+    )
+    parser.add_argument("--case", type=str, default="clipping", choices=["linear", "cp_removal", "clipping"])
+    parser.add_argument("--clip-ratio", type=float, default=1.6)
+    parser.add_argument(
+        "--pilot-kind",
+        type=str,
+        default="qpsk",
+        choices=["ones", "qpsk"],
+        help="Pilot sequence on active stream slots. qpsk avoids the high-PAPR all-ones OFDM impulse.",
     )
     parser.add_argument("--seed", type=int, default=7)
     return parser.parse_args()
@@ -157,11 +175,51 @@ def linear_to_db(value: float | np.ndarray, floor: float = 1e-300) -> float | np
     return 10.0 * np.log10(np.maximum(np.asarray(value), floor))
 
 
+def apply_clipping(time_symbol: np.ndarray, clip_ratio: float) -> np.ndarray:
+    time_symbol = np.asarray(time_symbol, dtype=np.complex64)
+    rms = np.sqrt(np.mean(np.abs(time_symbol) ** 2, axis=-1, keepdims=True))
+    threshold = float(clip_ratio) * np.maximum(rms, 1e-12)
+    magnitude = np.abs(time_symbol)
+    scale = np.ones_like(magnitude, dtype=np.float32)
+    mask = magnitude > threshold
+    scale[mask] = (threshold / np.maximum(magnitude, 1e-12))[mask]
+    return (time_symbol * scale).astype(np.complex64)
+
+
 def ofdm_modulate_freq(freq_symbol: np.ndarray, cfg: MuMimoE2EConfig) -> np.ndarray:
     freq_symbol = np.asarray(freq_symbol, dtype=np.complex64)
     time_no_cp = np.fft.ifft(freq_symbol, n=cfg.n_fft, axis=-1) * math.sqrt(cfg.n_fft)
+    if cfg.case == "clipping":
+        time_no_cp = apply_clipping(time_no_cp, cfg.clip_ratio)
+    if cfg.case == "cp_removal":
+        return time_no_cp.astype(np.complex64)
     cp = time_no_cp[..., -cfg.n_cp :] if cfg.n_cp > 0 else time_no_cp[..., :0]
     return np.concatenate([cp, time_no_cp], axis=-1).astype(np.complex64)
+
+
+def precoded_tx_frequency(stream_freq: np.ndarray, W_precoder: np.ndarray) -> np.ndarray:
+    return np.einsum("kts,sk->tk", W_precoder, stream_freq).astype(np.complex64)
+
+
+def apply_multipath_mimo(tx_time: np.ndarray, h_time: np.ndarray) -> np.ndarray:
+    tx_time = np.asarray(tx_time, dtype=np.complex64)
+    h_time = np.asarray(h_time, dtype=np.complex64)
+    n_tx, time_len = tx_time.shape
+    n_users, n_taps, n_rx, h_tx = h_time.shape
+    if h_tx != n_tx:
+        raise ValueError(f"Channel n_tx={h_tx} does not match waveform n_tx={n_tx}")
+    y_time = np.zeros((n_users, n_rx, time_len), dtype=np.complex64)
+    for user_id in range(n_users):
+        for tap_index in range(n_taps):
+            usable = time_len - tap_index
+            if usable <= 0:
+                continue
+            for rx_id in range(n_rx):
+                for tx_id in range(n_tx):
+                    y_time[user_id, rx_id, tap_index:] += (
+                        h_time[user_id, tap_index, rx_id, tx_id] * tx_time[tx_id, :usable]
+                    )
+    return y_time
 
 
 def generate_multipath_channels(cfg: MuMimoE2EConfig, rng: np.random.Generator) -> np.ndarray:
@@ -256,12 +314,18 @@ def add_awgn(
 def make_orthogonal_pilots(cfg: MuMimoE2EConfig, n_frames: int) -> np.ndarray:
     x_p = np.zeros((n_frames, cfg.n_streams, cfg.n_streams, cfg.n_fft), dtype=np.complex64)
     for stream_id in range(cfg.n_streams):
-        x_p[:, stream_id, stream_id, :] = 1.0 + 0.0j
+        if cfg.pilot_kind == "ones":
+            pilot = np.ones(cfg.n_fft, dtype=np.complex64)
+        else:
+            rng = np.random.default_rng(int(cfg.seed) + 7919 * (stream_id + 1))
+            phases = rng.integers(0, 4, size=cfg.n_fft)
+            pilot = np.exp(1j * (np.pi / 2.0) * phases).astype(np.complex64)
+        x_p[:, stream_id, stream_id, :] = pilot[None, :]
     return x_p
 
 
 def _empty_split(cfg: MuMimoE2EConfig, n_frames: int) -> dict[str, np.ndarray]:
-    rx_time_len = cfg.n_fft + cfg.n_cp
+    rx_time_len = cfg.n_fft if cfg.case == "cp_removal" else cfg.n_fft + cfg.n_cp
     bps = bits_per_symbol(cfg.modulation)
     return {
         "rx_p_time": np.zeros(
@@ -334,18 +398,23 @@ def _make_split_dataset(
             cfg.n_fft,
         )
 
-        y_d_clean = np.einsum("kurs,sk->urk", A_eff_true, x_data).astype(np.complex64)
+        x_tx_data_freq = precoded_tx_frequency(x_data, W_precoder)
+        x_tx_data_time = ofdm_modulate_freq(x_tx_data_freq, cfg)
+        y_d_clean = apply_multipath_mimo(x_tx_data_time, h_time)
         signal_power = float(np.mean(np.abs(y_d_clean) ** 2))
         noise_power = noise_power_from_snr(signal_power, snr_db)
-        y_d_freq = add_awgn(y_d_clean, noise_power, rng)
+        y_d_time = add_awgn(y_d_clean, noise_power, rng)
 
-        y_p_freq = np.zeros(
-            (cfg.n_streams, cfg.n_users, cfg.n_rx_per_ue, cfg.n_fft),
+        y_p_time = np.zeros(
+            (cfg.n_streams, cfg.n_users, cfg.n_rx_per_ue, x_tx_data_time.shape[-1]),
             dtype=np.complex64,
         )
         for pilot_slot in range(cfg.n_streams):
-            y_p_clean = np.transpose(A_eff_true[:, :, :, pilot_slot], (1, 2, 0))
-            y_p_freq[pilot_slot] = add_awgn(y_p_clean, noise_power, rng)
+            x_pilot = data["x_p_freq"][frame_index, pilot_slot]
+            x_tx_pilot_freq = precoded_tx_frequency(x_pilot, W_precoder)
+            x_tx_pilot_time = ofdm_modulate_freq(x_tx_pilot_freq, cfg)
+            y_p_clean = apply_multipath_mimo(x_tx_pilot_time, h_time)
+            y_p_time[pilot_slot] = add_awgn(y_p_clean, noise_power, rng)
 
         desired_power = np.zeros(cfg.n_users, dtype=np.float32)
         inter_stream_power = np.zeros(cfg.n_users, dtype=np.float32)
@@ -364,8 +433,8 @@ def _make_split_dataset(
 
         cond_A = _condition_numbers(A_eff_true)
 
-        data["rx_p_time"][frame_index] = ofdm_modulate_freq(y_p_freq, cfg)
-        data["rx_d_time"][frame_index] = ofdm_modulate_freq(y_d_freq, cfg)
+        data["rx_p_time"][frame_index] = y_p_time
+        data["rx_d_time"][frame_index] = y_d_time
         data["x_d_freq"][frame_index] = x_data
         data["bits"][frame_index] = frame_bits
         data["H_true"][frame_index] = H_true
@@ -409,10 +478,14 @@ def write_config(out_dir: Path, cfg: MuMimoE2EConfig) -> Path:
     data = asdict(cfg)
     data["snr_test_db"] = list(cfg.snr_test_db)
     data["n_streams"] = cfg.n_streams
-    data["case"] = "linear"
     data["waveform_type"] = "raw_mumimo_e2e"
-    data["pilot_design"] = "orthogonal_stream_slots"
+    data["pilot_design"] = f"orthogonal_stream_slots_{cfg.pilot_kind}"
     data["power_policy"] = "per_stream_fixed_unit_precoder_column_norm"
+    data["nonlinear_processing"] = {
+        "linear": "normal BS-antenna OFDM waveform with cyclic prefix",
+        "cp_removal": "BS transmitter omits cyclic prefix; receiver FFT starts at sample 0",
+        "clipping": "BS per-antenna time-domain OFDM symbol is clipped before cyclic prefix insertion",
+    }[cfg.case]
     data["symbol_power"] = "E[|s_u|^2] = 1 for QAM data and active pilots"
     data["precoder"] = (
         "ZF on G_tx_est, where G_tx_est[u] = c_u^H H_tx_est[u] and c_u is the "
@@ -421,7 +494,7 @@ def write_config(out_dir: Path, cfg: MuMimoE2EConfig) -> Path:
     data["noise_power"] = (
         "complex per-antenna variance sigma2; generated as sqrt(sigma2/2)*(n_re+j*n_im)"
     )
-    data["snr_definition"] = "sigma2 = mean(|A_eff_true @ x_d_freq|^2) / 10^(snr_db/10)"
+    data["snr_definition"] = "sigma2 = mean(|raw received data waveform before AWGN|^2) / 10^(snr_db/10)"
     data["receiver_compatibility"] = "raw UE antenna-domain waveform; use rx_mumimo_receiver.py"
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -483,6 +556,9 @@ def build_config(args: argparse.Namespace) -> MuMimoE2EConfig:
         n_val_frames=int(args.n_val_frames),
         n_test_frames_per_snr=int(args.n_test_frames_per_snr),
         csit_error_var=float(args.csit_error_var),
+        case=str(args.case),
+        clip_ratio=float(args.clip_ratio),
+        pilot_kind=str(args.pilot_kind),
         seed=int(args.seed),
     )
 
