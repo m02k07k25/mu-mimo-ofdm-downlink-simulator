@@ -1,5 +1,14 @@
 # TODO: End-to-End MU-MIMO ComNet Extension
 
+## Implementation status
+
+- Added raw E2E TX: `tx_mumimo_e2e_dataset.py`.
+- Added raw E2E RX: `rx_mumimo_receiver.py`.
+- Added E2E documentation: `README_mumimo_e2e_receiver.md`.
+- Kept the effective-SISO bridge path for comparison:
+  `tx_mumimo_comnet_dataset.py` + `rx_comnet_receiver.py`.
+- Verified 16QAM smoke and noiseless sanity checks.
+
 작성일: 2026-05-12
 
 ## 현재 상황

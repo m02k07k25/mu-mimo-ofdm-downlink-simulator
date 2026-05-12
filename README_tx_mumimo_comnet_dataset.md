@@ -6,6 +6,10 @@ waveforms. Instead, it applies conventional MU-MIMO precoding and UE combining,
 then saves each user's post-combining effective scalar stream in the same `.npz`
 shape expected by `rx_comnet_receiver.py`.
 
+For the raw end-to-end MU-MIMO receiver path, use
+`tx_mumimo_e2e_dataset.py` and `rx_mumimo_receiver.py`; see
+`README_mumimo_e2e_receiver.md`.
+
 In short:
 
 ```text
