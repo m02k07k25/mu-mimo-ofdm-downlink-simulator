@@ -54,7 +54,7 @@ RX 학습/평가:
 
 ```powershell
 conda activate torch_mk
-python rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_scm_csit005_clip20 --result-dir results_mumimo_e2e_64qam_scm_csit005_clip20 --mode train-all --sd-type both --sd-epochs 150 --bilstm-epochs 150 --device cuda
+python rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_scm_csit005_clip20 --result-dir results_mumimo_e2e_64qam_scm_csit005_clip20_reliability --mode train-all --sd-type both --sd-feature-set reliability --ce-type resmlp --ce-hidden-dim 512 --ce-dropout 0.05 --sd-epochs 150 --bilstm-epochs 300 --device cuda
 ```
 
 작게 동작 확인만 할 때:
@@ -106,7 +106,7 @@ rx_p_time, x_p_freq
 -> optional LMMSE channel estimation
 -> ComNet CE channel refinement
 -> ZF/MMSE linear detector
--> FC/BiLSTM symbol detector
+-> FC/BiLSTM symbol detector with optional residual/reliability features
 -> hard demodulation
 -> BER 계산
 ```
@@ -119,6 +119,33 @@ a_mse_vs_snr.png
 eval_summary.json
 train_history_*.csv
 ```
+
+### 결과 그래프 선 의미
+
+`ber_vs_snr.png`는 SNR별 BER, Bit Error Rate를 그립니다. 아래로 갈수록 좋은 결과입니다.
+
+```text
+LS-ZF                  pilot으로 구한 LS channel estimate + ZF linear detector
+LS-MMSE                pilot으로 구한 LS channel estimate + MMSE linear detector
+LMMSE-ZF               LS estimate를 empirical LMMSE로 보정한 channel + ZF detector
+LMMSE-MMSE             LMMSE channel estimate + MMSE detector, 주요 classical baseline
+ComNet-CE-ZF-Hard      ComNet CE가 보정한 channel + ZF detector + hard QAM decision
+ComNet-FC              ComNet CE channel + FC symbol detector
+ComNet-BiLSTM          ComNet CE channel + BiLSTM symbol detector
+True-H ZF              실제 effective channel A_eff_true를 알고 있다고 가정한 ZF oracle baseline
+True-H MMSE            실제 effective channel A_eff_true를 알고 있다고 가정한 MMSE oracle baseline
+Desired-only MRC       target stream channel만 matched combining하고 stream 간섭 제거는 하지 않는 sanity baseline
+```
+
+`a_mse_vs_snr.png`는 channel estimate가 실제 effective channel `A_eff_true`와 얼마나 다른지 MSE를 dB로 그립니다. 낮을수록 channel 추정이 더 정확합니다.
+
+```text
+LS                     pilot에서 바로 계산한 channel estimate A_ls
+LMMSE                  LS estimate를 empirical LMMSE로 선형 보정한 channel estimate
+ComNet-CE              CE network가 보정한 channel estimate A_comnet
+```
+
+`eval_summary.json`에는 같은 값이 숫자로 저장됩니다. BER가 비슷할 때는 `bit_errors`와 `total_bits`를 같이 봐야 실제 error count 차이를 확인할 수 있습니다.
 
 ## 핵심 개념
 
@@ -251,6 +278,12 @@ MMSE는 간섭 제거와 noise 증폭 사이에서 균형을 잡습니다. 낮�
 --pilot-kind              ones 또는 qpsk
 --snr-train-db            train/val SNR
 --snr-test-db             test SNR sweep
+--ce-type                 CE 모델 선택, 기본 resmlp
+--ce-hidden-dim           Residual MLP CE hidden size, 기본 512
+--ce-dropout              Residual MLP CE dropout, 기본 0.05
+--sd-feature-set          basic 또는 reliability, 기본 reliability
+--bilstm-hidden-dims      BiLSTM hidden size 3개, 기본 64 32 16
+--bilstm-lr-step          BiLSTM 전용 LR decay step, 기본 100
 ```
 
 ## 함수 설명
@@ -280,9 +313,10 @@ mumimo_phy/ofdm.py
 rx_mumimo_receiver.py
   preprocess_split          pilot/data를 FFT하고 LS channel 추정
   linear_detect             ZF/MMSE 검출
-  MuMimoCERefineNet         channel estimate 보정
+  MuMimoCEResMLPNet         LS/LMMSE channel estimate에 residual MLP 보정
   MuMimoFCSDNet             FC 기반 symbol detector
   MuMimoBiLSTMSDNet         BiLSTM 기반 symbol detector
+  make_sd_features          ZF/MMSE/residual/reliability SD 입력 feature 생성
 ```
 
 ## 현재 권장 실험
@@ -291,7 +325,7 @@ rx_mumimo_receiver.py
 
 ```powershell
 python tx_mumimo_e2e_dataset.py --out-dir outputs_mumimo_e2e_64qam_scm_csit005_clip20 --modulation 64QAM --case clipping --clip-ratio 2.0 --pilot-kind qpsk --n-train-frames 5000 --n-val-frames 1000 --n-test-frames-per-snr 1000
-python rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_scm_csit005_clip20 --result-dir results_mumimo_e2e_64qam_scm_csit005_clip20 --mode train-all --sd-type both --sd-epochs 150 --bilstm-epochs 150 --device cuda
+python rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_scm_csit005_clip20 --result-dir results_mumimo_e2e_64qam_scm_csit005_clip20_reliability --mode train-all --sd-type both --sd-feature-set reliability --ce-type resmlp --ce-hidden-dim 512 --ce-dropout 0.05 --sd-epochs 150 --bilstm-epochs 300 --device cuda
 ```
 
 ## 주의

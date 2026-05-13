@@ -13,6 +13,9 @@
   - `copy/ZF_precoding.m` -> `zf_precoder`
   - `copy/awgn_noise.m` -> `add_awgn`
 - analog TX/RX steering beam과 per-subcarrier digital ZF precoder를 적용했다.
+- BiLSTM-SD 기본 hidden size를 `20 10 6`에서 `64 32 16`으로 키우고, BiLSTM 전용 LR step 기본값을 `100`, epoch 기본값을 `300`으로 조정했다.
+- CE 기본 모델을 기존 linear 보정에서 `base + residual MLP` 구조의 `resmlp`로 바꿨다. 기본값은 `--ce-hidden-dim 512 --ce-dropout 0.05`이다.
+- SDNet 입력에 `--sd-feature-set reliability`를 추가해 ZF/MMSE 추정값, full-stream residual, gain, cond(A), noise/SNR feature를 함께 사용한다.
 - `csit_error_var` 기본값을 `0.005`로 변경했다.
 - clipping 조건에서 all-ones pilot이 channel estimation floor를 만들 수 있음을 확인하고, `--pilot-kind qpsk`를 기본 pilot 방향으로 정리했다.
 - `mumimo_phy/` 패키지를 추가해 OFDM, QAM, noise, SCM, beamforming을 모듈화했다.
@@ -42,7 +45,7 @@ pilot_kind = qpsk
 
 ```powershell
 python tx_mumimo_e2e_dataset.py --out-dir outputs_mumimo_e2e_64qam_scm_csit005_clip20 --modulation 64QAM --case clipping --clip-ratio 2.0 --pilot-kind qpsk --n-train-frames 5000 --n-val-frames 1000 --n-test-frames-per-snr 1000
-python rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_scm_csit005_clip20 --result-dir results_mumimo_e2e_64qam_scm_csit005_clip20 --mode train-all --sd-type both --sd-epochs 150 --bilstm-epochs 150 --device cuda
+python rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_scm_csit005_clip20 --result-dir results_mumimo_e2e_64qam_scm_csit005_clip20_reliability --mode train-all --sd-type both --sd-feature-set reliability --ce-type resmlp --ce-hidden-dim 512 --ce-dropout 0.05 --sd-epochs 150 --bilstm-epochs 300 --device cuda
 ```
 
 ## 다음 작업

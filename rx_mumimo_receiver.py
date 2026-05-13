@@ -5,7 +5,7 @@ import csv
 import json
 import math
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Union
 
 import numpy as np
 import torch
@@ -27,6 +27,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--sd-type", type=str, default="both", choices=["fc", "bilstm", "both"])
     parser.add_argument("--sd-loss", type=str, default="mse", choices=["mse", "bce"])
+    parser.add_argument("--sd-feature-set", type=str, default="reliability", choices=["basic", "reliability"])
+    parser.add_argument("--ce-type", type=str, default="resmlp", choices=["linear", "resmlp"])
     parser.add_argument("--ce-init", type=str, default="lmmse", choices=["identity", "lmmse"])
     parser.add_argument("--ce-checkpoint", type=str, default=None)
     parser.add_argument("--fc-checkpoint", type=str, default=None)
@@ -34,17 +36,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lmmse-checkpoint", type=str, default=None)
     parser.add_argument("--ce-epochs", type=int, default=50)
     parser.add_argument("--sd-epochs", type=int, default=50)
-    parser.add_argument("--bilstm-epochs", type=int, default=None)
+    parser.add_argument("--bilstm-epochs", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--ce-lr", type=float, default=1e-3)
     parser.add_argument("--sd-lr", type=float, default=1e-3)
     parser.add_argument("--bilstm-lr", type=float, default=None)
     parser.add_argument("--ce-lr-step", type=int, default=25)
     parser.add_argument("--sd-lr-step", type=int, default=25)
+    parser.add_argument("--bilstm-lr-step", type=int, default=100)
     parser.add_argument("--ce-lr-gamma", type=float, default=0.5)
     parser.add_argument("--sd-lr-gamma", type=float, default=0.5)
     parser.add_argument("--group-size", type=int, default=8)
     parser.add_argument("--hidden-dim", type=int, default=256)
+    parser.add_argument("--ce-hidden-dim", type=int, default=512)
+    parser.add_argument("--ce-dropout", type=float, default=0.05)
+    parser.add_argument("--bilstm-hidden-dims", nargs=3, type=int, default=(64, 32, 16))
     parser.add_argument("--lmmse-ridge", type=float, default=1e-6)
     parser.add_argument("--eps", type=float, default=1e-8)
     parser.add_argument("--device", type=str, default="auto")
@@ -132,15 +138,81 @@ class MuMimoCERefineNet(nn.Module):
         with torch.no_grad():
             self.linear.weight.copy_(torch.eye(self.input_dim, device=self.linear.weight.device))
 
+    def init_base(self, weight: torch.Tensor) -> None:
+        if tuple(weight.shape) != (self.input_dim, self.input_dim):
+            raise ValueError(f"Expected CE weight shape {(self.input_dim, self.input_dim)}, got {tuple(weight.shape)}")
+        with torch.no_grad():
+            self.linear.weight.copy_(weight)
+
+
+class MuMimoCEResMLPNet(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int = 512, dropout: float = 0.05) -> None:
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.dropout = float(dropout)
+        self.base = nn.Linear(self.input_dim, self.input_dim, bias=False)
+        self.residual = nn.Sequential(
+            nn.Linear(self.input_dim, self.hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.hidden_dim, self.input_dim),
+        )
+        nn.init.zeros_(self.residual[-1].weight)
+        nn.init.zeros_(self.residual[-1].bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.base(x) + self.residual(x)
+
+    def init_identity(self) -> None:
+        with torch.no_grad():
+            self.base.weight.copy_(torch.eye(self.input_dim, device=self.base.weight.device))
+
+    def init_base(self, weight: torch.Tensor) -> None:
+        if tuple(weight.shape) != (self.input_dim, self.input_dim):
+            raise ValueError(f"Expected CE weight shape {(self.input_dim, self.input_dim)}, got {tuple(weight.shape)}")
+        with torch.no_grad():
+            self.base.weight.copy_(weight)
+
+
+MuMimoCEModel = Union[MuMimoCERefineNet, MuMimoCEResMLPNet]
+
+
+def build_ce_model(
+    ce_type: str,
+    input_dim: int,
+    *,
+    hidden_dim: int = 512,
+    dropout: float = 0.05,
+) -> MuMimoCEModel:
+    ce_type = str(ce_type).lower()
+    if ce_type == "linear":
+        return MuMimoCERefineNet(input_dim)
+    if ce_type == "resmlp":
+        return MuMimoCEResMLPNet(input_dim, hidden_dim=hidden_dim, dropout=dropout)
+    raise ValueError(f"Unsupported CE type: {ce_type}")
+
 
 class MuMimoFCSDNet(nn.Module):
-    def __init__(self, group_size: int, bits_per_symbol_value: int, hidden_dim: int) -> None:
+    def __init__(
+        self,
+        group_size: int,
+        bits_per_symbol_value: int,
+        hidden_dim: int,
+        feature_dim: int = 2,
+        sd_feature_set: str = "basic",
+    ) -> None:
         super().__init__()
         self.group_size = int(group_size)
         self.bits_per_symbol = int(bits_per_symbol_value)
         self.hidden_dim = int(hidden_dim)
+        self.feature_dim = int(feature_dim)
+        self.sd_feature_set = str(sd_feature_set)
         self.net = nn.Sequential(
-            nn.Linear(2 * self.group_size, self.hidden_dim),
+            nn.Linear(self.feature_dim * self.group_size, self.hidden_dim),
             nn.ReLU(),
             nn.Linear(self.hidden_dim, self.hidden_dim // 2),
             nn.ReLU(),
@@ -152,39 +224,55 @@ class MuMimoFCSDNet(nn.Module):
 
 
 class MuMimoBiLSTMSDNet(nn.Module):
-    def __init__(self, n_fft: int, bits_per_symbol_value: int, group_size: int) -> None:
+    def __init__(
+        self,
+        n_fft: int,
+        bits_per_symbol_value: int,
+        group_size: int,
+        hidden_dims: tuple[int, int, int] = (64, 32, 16),
+        feature_dim: int = 6,
+        sd_feature_set: str = "basic",
+    ) -> None:
         super().__init__()
         self.n_fft = int(n_fft)
         self.bits_per_symbol = int(bits_per_symbol_value)
         self.group_size = int(group_size)
+        self.hidden_dims = tuple(int(x) for x in hidden_dims)
+        self.feature_dim = int(feature_dim)
+        self.sd_feature_set = str(sd_feature_set)
         if self.n_fft % self.group_size != 0:
             raise ValueError("n_fft must be divisible by group_size")
+        if len(self.hidden_dims) != 3 or min(self.hidden_dims) <= 0:
+            raise ValueError("hidden_dims must contain three positive integers")
+        if self.feature_dim <= 0:
+            raise ValueError("feature_dim must be positive")
         self.n_groups = self.n_fft // self.group_size
+        h1, h2, h3 = self.hidden_dims
         self.lstm1 = nn.LSTM(
-            input_size=6,
-            hidden_size=20,
+            input_size=self.feature_dim,
+            hidden_size=h1,
             batch_first=True,
             bidirectional=True,
         )
         self.lstm2 = nn.LSTM(
-            input_size=40,
-            hidden_size=10,
+            input_size=2 * h1,
+            hidden_size=h2,
             batch_first=True,
             bidirectional=True,
         )
         self.lstm3 = nn.LSTM(
-            input_size=20,
-            hidden_size=6,
+            input_size=2 * h2,
+            hidden_size=h3,
             batch_first=True,
             bidirectional=True,
         )
-        self.output = nn.Linear(12 * self.group_size, self.group_size * self.bits_per_symbol)
+        self.output = nn.Linear(2 * h3 * self.group_size, self.group_size * self.bits_per_symbol)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, _ = self.lstm1(x)
         x, _ = self.lstm2(x)
         x, _ = self.lstm3(x)
-        x = x.reshape(x.shape[0], self.n_groups, self.group_size * 12)
+        x = x.reshape(x.shape[0], self.n_groups, self.group_size * 2 * self.hidden_dims[2])
         return self.output(x)
 
 
@@ -366,6 +454,46 @@ def linear_detect(
         return estimates.astype(np.complex64)
 
 
+def linear_detect_with_gain(
+    y_d: np.ndarray,
+    a_eff: np.ndarray,
+    noise_power: np.ndarray,
+    *,
+    method: str,
+    eps: float,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    n_frames, _, _, n_rx = y_d.shape
+    n_streams = a_eff.shape[-1]
+    if method == "zf" and n_streams > n_rx:
+        return None
+
+    ah = np.swapaxes(np.conj(a_eff), -1, -2)
+    gram = np.matmul(ah, a_eff)
+    matched = np.matmul(ah, y_d[..., None])[..., 0]
+    eye = np.eye(n_streams, dtype=np.complex64)
+
+    if method == "zf":
+        system = gram + (float(eps) * eye)[None, None, None, :, :]
+    elif method == "mmse":
+        sigma2 = np.asarray(noise_power, dtype=np.float32).reshape(n_frames, 1, 1, 1, 1)
+        system = gram + sigma2 * eye[None, None, None, :, :]
+    else:
+        raise ValueError(f"Unsupported detector: {method}")
+
+    try:
+        estimates = np.linalg.solve(system, matched[..., None])[..., 0]
+        response = np.linalg.solve(system, gram)
+    except np.linalg.LinAlgError:
+        pinv = np.linalg.pinv(system)
+        estimates = np.matmul(pinv, matched[..., None])[..., 0]
+        response = np.matmul(pinv, gram)
+
+    gain = np.diagonal(response, axis1=-2, axis2=-1)
+    if method == "mmse":
+        estimates = estimates / np.where(np.abs(gain) > eps, gain, 1.0 + 0.0j)
+    return estimates.astype(np.complex64), gain.astype(np.complex64)
+
+
 def target_user_streams(full_stream_estimates: np.ndarray) -> np.ndarray:
     n_frames, n_fft, n_users, _ = full_stream_estimates.shape
     out = np.zeros((n_frames, n_users, n_fft), dtype=np.complex64)
@@ -431,6 +559,9 @@ def save_training_plot(
     if not rows:
         return
     try:
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
     except Exception as exc:
         print(f"[WARN] matplotlib import failed, training plot skipped: {exc}")
@@ -531,16 +662,20 @@ def train_ce(
     device: torch.device,
     checkpoint_path: Path,
     lmmse_weight: np.ndarray | None,
-) -> MuMimoCERefineNet:
+) -> MuMimoCEModel:
     input_dim = ce_feature_dim(cfg)
-    model = MuMimoCERefineNet(input_dim).to(device)
+    model = build_ce_model(
+        str(args.ce_type),
+        input_dim,
+        hidden_dim=int(args.ce_hidden_dim),
+        dropout=float(args.ce_dropout),
+    ).to(device)
     if args.ce_init == "identity":
         model.init_identity()
     elif args.ce_init == "lmmse":
         if lmmse_weight is None:
             raise ValueError("lmmse_weight is required for --ce-init lmmse")
-        with torch.no_grad():
-            model.linear.weight.copy_(torch.from_numpy(np.asarray(lmmse_weight, dtype=np.float32)).to(device))
+        model.init_base(torch.from_numpy(np.asarray(lmmse_weight, dtype=np.float32)).to(device))
 
     x_train = ce_complex_to_ri(train_data["a_ls"])
     y_train = ce_complex_to_ri(train_data["a_true"])
@@ -622,7 +757,10 @@ def train_ce(
             "n_users": int(cfg["n_users"]),
             "n_rx_per_ue": int(cfg["n_rx_per_ue"]),
             "n_streams": int(cfg.get("n_streams", cfg["n_users"])),
+            "ce_type": str(args.ce_type),
             "ce_init": str(args.ce_init),
+            "ce_hidden_dim": int(args.ce_hidden_dim),
+            "ce_dropout": float(args.ce_dropout),
         },
         checkpoint_path,
     )
@@ -630,18 +768,33 @@ def train_ce(
     return model
 
 
-def load_ce_model(path: Path, cfg: dict[str, Any], device: torch.device) -> MuMimoCERefineNet:
+def load_ce_model(path: Path, cfg: dict[str, Any], device: torch.device) -> MuMimoCEModel:
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     input_dim = int(checkpoint.get("input_dim", ce_feature_dim(cfg)))
-    model = MuMimoCERefineNet(input_dim).to(device)
-    model.load_state_dict(checkpoint["state_dict"])
+    state_dict = checkpoint["state_dict"]
+    ce_type = str(checkpoint.get("ce_type", "")).lower()
+    if ce_type not in {"linear", "resmlp"}:
+        ce_type = "resmlp" if "base.weight" in state_dict else "linear"
+    hidden_dim = int(
+        checkpoint.get(
+            "ce_hidden_dim",
+            state_dict["residual.0.weight"].shape[0] if "residual.0.weight" in state_dict else 512,
+        )
+    )
+    model = build_ce_model(
+        ce_type,
+        input_dim,
+        hidden_dim=hidden_dim,
+        dropout=float(checkpoint.get("ce_dropout", 0.0)),
+    ).to(device)
+    model.load_state_dict(state_dict)
     model.eval()
-    print(f"[LOAD] CE checkpoint: {path}")
+    print(f"[LOAD] CE checkpoint: {path} (type={ce_type})")
     return model
 
 
 def predict_ce(
-    model: MuMimoCERefineNet,
+    model: MuMimoCEModel,
     a_ls: np.ndarray,
     *,
     device: torch.device,
@@ -666,33 +819,175 @@ def sd_loss_value(logits: torch.Tensor, target: torch.Tensor, sd_loss: str) -> t
     raise ValueError(f"Unsupported SD loss: {sd_loss}")
 
 
+def validate_sd_feature_set(feature_set: str) -> str:
+    feature_set = str(feature_set).lower()
+    if feature_set not in {"basic", "reliability"}:
+        raise ValueError(f"Unsupported SD feature set: {feature_set}")
+    return feature_set
+
+
+def sd_feature_dim(feature_set: str, sd_kind: str) -> int:
+    feature_set = validate_sd_feature_set(feature_set)
+    sd_kind = str(sd_kind).lower()
+    if feature_set == "reliability":
+        return 11
+    if sd_kind == "fc":
+        return 2
+    if sd_kind == "bilstm":
+        return 6
+    raise ValueError(f"Unsupported SD kind: {sd_kind}")
+
+
+def infer_sd_feature_set(feature_dim: int, sd_kind: str, fallback: str) -> str:
+    feature_dim = int(feature_dim)
+    sd_kind = str(sd_kind).lower()
+    if feature_dim == sd_feature_dim("reliability", sd_kind):
+        return "reliability"
+    if feature_dim == sd_feature_dim("basic", sd_kind):
+        return "basic"
+    return validate_sd_feature_set(fallback)
+
+
+def normalized_log_feature(values: np.ndarray, floor: float, lo: float, hi: float, scale: float) -> np.ndarray:
+    logged = np.log10(np.maximum(np.asarray(values, dtype=np.float32), float(floor)))
+    return (np.clip(logged, float(lo), float(hi)) / float(scale)).astype(np.float32)
+
+
+def frame_feature(values: np.ndarray, n_users: int, n_fft: int) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32).reshape(-1)
+    return np.broadcast_to(values[:, None, None], (values.size, n_users, n_fft)).astype(np.float32)
+
+
+def condition_feature(cond_a: np.ndarray, n_frames: int, n_users: int, n_fft: int) -> np.ndarray:
+    cond = np.asarray(cond_a, dtype=np.float32)
+    if cond.shape == (n_frames, n_fft, n_users):
+        cond = np.transpose(cond, (0, 2, 1))
+    elif cond.shape != (n_frames, n_users, n_fft):
+        cond = np.ones((n_frames, n_users, n_fft), dtype=np.float32)
+    return normalized_log_feature(np.maximum(cond, 1.0), 1.0, 0.0, 4.0, 4.0)
+
+
+def make_sd_features(
+    *,
+    y_d: np.ndarray,
+    a_hat: np.ndarray,
+    noise_power: np.ndarray,
+    snr_db: np.ndarray,
+    cond_a: np.ndarray,
+    feature_set: str,
+    sd_kind: str,
+    eps: float,
+) -> np.ndarray:
+    feature_set = validate_sd_feature_set(feature_set)
+    sd_kind = str(sd_kind).lower()
+    y_d = np.asarray(y_d, dtype=np.complex64)
+    a_hat = np.asarray(a_hat, dtype=np.complex64)
+    n_frames, n_fft, n_users, n_rx = y_d.shape
+    n_streams = a_hat.shape[-1]
+    if n_users > n_streams:
+        raise RuntimeError("SD features assume one target stream per user")
+
+    zf_info = linear_detect_with_gain(y_d, a_hat, noise_power, method="zf", eps=eps)
+    if zf_info is None:
+        raise RuntimeError(f"{sd_kind.upper()}-SD requires n_streams <= n_rx_per_ue for ZF features")
+    zf_estimates, _ = zf_info
+    zf_target = target_user_streams(zf_estimates)
+
+    if feature_set == "basic" and sd_kind == "fc":
+        return np.stack([zf_target.real, zf_target.imag], axis=-1).astype(np.float32)
+
+    mmse_info = linear_detect_with_gain(y_d, a_hat, noise_power, method="mmse", eps=eps)
+    if mmse_info is None:
+        raise RuntimeError("MMSE estimates are required for SD reliability features")
+    mmse_estimates, mmse_gain = mmse_info
+    mmse_target = target_user_streams(mmse_estimates)
+
+    snr_norm = (np.asarray(snr_db, dtype=np.float32) / 40.0).astype(np.float32)
+
+    if feature_set == "basic":
+        noise_log = np.log10(np.maximum(np.asarray(noise_power, dtype=np.float32), 1e-30)).astype(np.float32)
+        return np.stack(
+            [
+                zf_target.real,
+                zf_target.imag,
+                mmse_target.real,
+                mmse_target.imag,
+                frame_feature(noise_log, n_users, n_fft),
+                frame_feature(snr_norm, n_users, n_fft),
+            ],
+            axis=-1,
+        ).astype(np.float32)
+
+    noise_log = normalized_log_feature(noise_power, 1e-12, -12.0, 2.0, 12.0)
+    noise_grid = frame_feature(noise_log, n_users, n_fft)
+    snr_grid = frame_feature(snr_norm, n_users, n_fft)
+    reconstructed = np.matmul(a_hat, mmse_estimates[..., None])[..., 0]
+    residual = y_d - reconstructed
+    h_target = np.stack([a_hat[:, :, user_id, :, user_id] for user_id in range(n_users)], axis=2)
+    residual_matched = np.sum(np.conj(h_target) * residual, axis=-1)
+    residual_denom = np.sum(np.abs(h_target) ** 2, axis=-1)
+    residual_matched = residual_matched / np.maximum(residual_denom, float(eps))
+    residual_matched = np.transpose(residual_matched, (0, 2, 1))
+    residual_power = np.transpose(np.mean(np.abs(residual) ** 2, axis=-1), (0, 2, 1))
+    log_res_power = normalized_log_feature(residual_power, 1e-12, -12.0, 2.0, 12.0)
+    gain_mag = np.abs(target_user_streams(mmse_gain)).astype(np.float32)
+    log_cond = condition_feature(cond_a, n_frames, n_users, n_fft)
+
+    return np.stack(
+        [
+            zf_target.real,
+            zf_target.imag,
+            mmse_target.real,
+            mmse_target.imag,
+            residual_matched.real,
+            residual_matched.imag,
+            log_res_power,
+            gain_mag,
+            log_cond,
+            noise_grid,
+            snr_grid,
+        ],
+        axis=-1,
+    ).astype(np.float32)
+
+
 def make_fc_sd_arrays(
     *,
     y_d: np.ndarray,
     a_hat: np.ndarray,
     bits: np.ndarray,
     noise_power: np.ndarray,
+    snr_db: np.ndarray,
+    cond_a: np.ndarray,
     group_size: int,
+    feature_set: str,
     eps: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    del noise_power
     n_frames, n_streams, n_fft, bps = bits.shape
     if n_fft % group_size != 0:
         raise ValueError("n_fft must be divisible by group_size")
-    estimates = linear_detect(y_d, a_hat, np.ones(n_frames, dtype=np.float32), method="zf", eps=eps)
-    if estimates is None:
-        raise RuntimeError("FC-SD requires n_streams <= n_rx_per_ue for ZF features")
-    target = target_user_streams(estimates)
+    features = make_sd_features(
+        y_d=y_d,
+        a_hat=a_hat,
+        noise_power=noise_power,
+        snr_db=snr_db,
+        cond_a=cond_a,
+        feature_set=feature_set,
+        sd_kind="fc",
+        eps=eps,
+    )
+    feature_dim = features.shape[-1]
+    if features.shape[:3] != (n_frames, n_streams, n_fft):
+        raise ValueError(f"Expected SD feature shape {(n_frames, n_streams, n_fft)}, got {features.shape[:3]}")
     n_groups = n_fft // group_size
-    x_groups = target.reshape(n_frames, n_streams, n_groups, group_size)
-    x_ri = np.concatenate([x_groups.real, x_groups.imag], axis=-1).astype(np.float32)
+    x_groups = features.reshape(n_frames, n_streams, n_groups, group_size, feature_dim)
     y = bits.reshape(n_frames, n_streams, n_groups, group_size, bps).reshape(
         n_frames,
         n_streams,
         n_groups,
         group_size * bps,
     )
-    return x_ri.reshape(n_frames * n_streams * n_groups, 2 * group_size), y.reshape(
+    return x_groups.reshape(n_frames * n_streams * n_groups, group_size * feature_dim), y.reshape(
         n_frames * n_streams * n_groups,
         group_size * bps,
     ).astype(np.float32)
@@ -705,33 +1000,27 @@ def make_bilstm_sd_arrays(
     bits: np.ndarray,
     noise_power: np.ndarray,
     snr_db: np.ndarray,
+    cond_a: np.ndarray,
     group_size: int,
+    feature_set: str,
     eps: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     n_frames, n_streams, n_fft, bps = bits.shape
     if n_fft % group_size != 0:
         raise ValueError("n_fft must be divisible by group_size")
-    zf_estimates = linear_detect(y_d, a_hat, noise_power, method="zf", eps=eps)
-    if zf_estimates is None:
-        raise RuntimeError("BiLSTM-SD requires n_streams <= n_rx_per_ue for ZF features")
-    mmse_estimates = linear_detect(y_d, a_hat, noise_power, method="mmse", eps=eps)
-    if mmse_estimates is None:
-        raise RuntimeError("MMSE estimates are required for BiLSTM-SD features")
-    zf_target = target_user_streams(zf_estimates)
-    mmse_target = target_user_streams(mmse_estimates)
-    noise_log = np.log10(np.maximum(noise_power, 1e-30)).astype(np.float32)
-    snr_norm = (snr_db / 40.0).astype(np.float32)
-    features = np.stack(
-        [
-            zf_target.real,
-            zf_target.imag,
-            mmse_target.real,
-            mmse_target.imag,
-            np.broadcast_to(noise_log[:, None, None], (n_frames, n_streams, n_fft)),
-            np.broadcast_to(snr_norm[:, None, None], (n_frames, n_streams, n_fft)),
-        ],
-        axis=-1,
-    ).astype(np.float32)
+    features = make_sd_features(
+        y_d=y_d,
+        a_hat=a_hat,
+        noise_power=noise_power,
+        snr_db=snr_db,
+        cond_a=cond_a,
+        feature_set=feature_set,
+        sd_kind="bilstm",
+        eps=eps,
+    )
+    feature_dim = features.shape[-1]
+    if features.shape[:3] != (n_frames, n_streams, n_fft):
+        raise ValueError(f"Expected SD feature shape {(n_frames, n_streams, n_fft)}, got {features.shape[:3]}")
     n_groups = n_fft // group_size
     y = bits.reshape(n_frames, n_streams, n_groups, group_size, bps).reshape(
         n_frames,
@@ -739,7 +1028,7 @@ def make_bilstm_sd_arrays(
         n_groups,
         group_size * bps,
     )
-    return features.reshape(n_frames * n_streams, n_fft, 6), y.reshape(
+    return features.reshape(n_frames * n_streams, n_fft, feature_dim), y.reshape(
         n_frames * n_streams,
         n_groups,
         group_size * bps,
@@ -751,13 +1040,14 @@ def train_fc_sd(
     cfg: dict[str, Any],
     train_data: dict[str, np.ndarray],
     val_data: dict[str, np.ndarray],
-    ce_model: MuMimoCERefineNet,
+    ce_model: MuMimoCEModel,
     args: argparse.Namespace,
     device: torch.device,
     checkpoint_path: Path,
 ) -> MuMimoFCSDNet:
     group_size = int(args.group_size)
     bps = bits_per_symbol(str(cfg["modulation"]))
+    feature_set = validate_sd_feature_set(str(args.sd_feature_set))
     a_train = predict_ce(ce_model, train_data["a_ls"], device=device, batch_size=int(args.batch_size))
     a_val = predict_ce(ce_model, val_data["a_ls"], device=device, batch_size=int(args.batch_size))
     x_train, y_train = make_fc_sd_arrays(
@@ -765,7 +1055,10 @@ def train_fc_sd(
         a_hat=a_train,
         bits=train_data["bits"],
         noise_power=train_data["noise_power"],
+        snr_db=train_data["snr_db"],
+        cond_a=train_data["cond_A"],
         group_size=group_size,
+        feature_set=feature_set,
         eps=float(args.eps),
     )
     x_val_np, y_val_np = make_fc_sd_arrays(
@@ -773,11 +1066,21 @@ def train_fc_sd(
         a_hat=a_val,
         bits=val_data["bits"],
         noise_power=val_data["noise_power"],
+        snr_db=val_data["snr_db"],
+        cond_a=val_data["cond_A"],
         group_size=group_size,
+        feature_set=feature_set,
         eps=float(args.eps),
     )
 
-    model = MuMimoFCSDNet(group_size, bps, int(args.hidden_dim)).to(device)
+    feature_dim = x_train.shape[1] // group_size
+    model = MuMimoFCSDNet(
+        group_size,
+        bps,
+        int(args.hidden_dim),
+        feature_dim=feature_dim,
+        sd_feature_set=feature_set,
+    ).to(device)
     train_ds = TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train))
     generator = torch.Generator()
     generator.manual_seed(int(args.seed) + 17)
@@ -853,6 +1156,8 @@ def train_fc_sd(
             "group_size": group_size,
             "bits_per_symbol": bps,
             "hidden_dim": int(args.hidden_dim),
+            "feature_dim": int(model.feature_dim),
+            "sd_feature_set": str(model.sd_feature_set),
             "modulation": str(cfg["modulation"]),
             "sd_loss": str(args.sd_loss),
         },
@@ -867,7 +1172,7 @@ def train_bilstm_sd(
     cfg: dict[str, Any],
     train_data: dict[str, np.ndarray],
     val_data: dict[str, np.ndarray],
-    ce_model: MuMimoCERefineNet,
+    ce_model: MuMimoCEModel,
     args: argparse.Namespace,
     device: torch.device,
     checkpoint_path: Path,
@@ -875,6 +1180,7 @@ def train_bilstm_sd(
     n_fft = int(cfg["n_fft"])
     bps = bits_per_symbol(str(cfg["modulation"]))
     group_size = int(args.group_size)
+    feature_set = validate_sd_feature_set(str(args.sd_feature_set))
     a_train = predict_ce(ce_model, train_data["a_ls"], device=device, batch_size=int(args.batch_size))
     a_val = predict_ce(ce_model, val_data["a_ls"], device=device, batch_size=int(args.batch_size))
     x_train, y_train = make_bilstm_sd_arrays(
@@ -883,7 +1189,9 @@ def train_bilstm_sd(
         bits=train_data["bits"],
         noise_power=train_data["noise_power"],
         snr_db=train_data["snr_db"],
+        cond_a=train_data["cond_A"],
         group_size=group_size,
+        feature_set=feature_set,
         eps=float(args.eps),
     )
     x_val_np, y_val_np = make_bilstm_sd_arrays(
@@ -892,11 +1200,22 @@ def train_bilstm_sd(
         bits=val_data["bits"],
         noise_power=val_data["noise_power"],
         snr_db=val_data["snr_db"],
+        cond_a=val_data["cond_A"],
         group_size=group_size,
+        feature_set=feature_set,
         eps=float(args.eps),
     )
 
-    model = MuMimoBiLSTMSDNet(n_fft, bps, group_size).to(device)
+    bilstm_hidden_dims = tuple(int(x) for x in args.bilstm_hidden_dims)
+    feature_dim = int(x_train.shape[-1])
+    model = MuMimoBiLSTMSDNet(
+        n_fft,
+        bps,
+        group_size,
+        bilstm_hidden_dims,
+        feature_dim=feature_dim,
+        sd_feature_set=feature_set,
+    ).to(device)
     train_ds = TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train))
     generator = torch.Generator()
     generator.manual_seed(int(args.seed) + 29)
@@ -910,10 +1229,11 @@ def train_bilstm_sd(
     y_val = torch.from_numpy(y_val_np).to(device)
     lr = float(args.bilstm_lr) if args.bilstm_lr is not None else float(args.sd_lr)
     n_epochs = int(args.bilstm_epochs) if args.bilstm_epochs is not None else int(args.sd_epochs)
+    lr_step = int(args.bilstm_lr_step) if args.bilstm_lr_step is not None else int(args.sd_lr_step)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer,
-        step_size=max(1, int(args.sd_lr_step)),
+        step_size=max(1, lr_step),
         gamma=float(args.sd_lr_gamma),
     )
 
@@ -974,6 +1294,9 @@ def train_bilstm_sd(
             "n_fft": n_fft,
             "group_size": group_size,
             "bits_per_symbol": bps,
+            "hidden_dims": list(model.hidden_dims),
+            "feature_dim": int(model.feature_dim),
+            "sd_feature_set": str(model.sd_feature_set),
             "modulation": str(cfg["modulation"]),
             "sd_loss": str(args.sd_loss),
         },
@@ -983,16 +1306,53 @@ def train_bilstm_sd(
     return model
 
 
-def load_fc_sd_model(path: Path, cfg: dict[str, Any], group_size: int, device: torch.device) -> MuMimoFCSDNet:
+def infer_fc_feature_dim(state_dict: dict[str, torch.Tensor], group_size: int) -> int:
+    input_dim = int(state_dict["net.0.weight"].shape[1])
+    if input_dim % int(group_size) != 0:
+        raise ValueError(f"FC-SD input dim {input_dim} is not divisible by group_size={group_size}")
+    return input_dim // int(group_size)
+
+
+def load_fc_sd_model(
+    path: Path,
+    cfg: dict[str, Any],
+    group_size: int,
+    device: torch.device,
+    args_feature_set: str,
+) -> MuMimoFCSDNet:
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     model_group_size = int(checkpoint.get("group_size", group_size))
     bps = int(checkpoint.get("bits_per_symbol", bits_per_symbol(str(cfg["modulation"]))))
     hidden_dim = int(checkpoint.get("hidden_dim", 256))
-    model = MuMimoFCSDNet(model_group_size, bps, hidden_dim).to(device)
+    feature_dim = int(checkpoint.get("feature_dim", infer_fc_feature_dim(checkpoint["state_dict"], model_group_size)))
+    feature_set = str(checkpoint.get("sd_feature_set", infer_sd_feature_set(feature_dim, "fc", args_feature_set)))
+    model = MuMimoFCSDNet(
+        model_group_size,
+        bps,
+        hidden_dim,
+        feature_dim=feature_dim,
+        sd_feature_set=feature_set,
+    ).to(device)
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
-    print(f"[LOAD] FC-SD checkpoint: {path}")
+    print(f"[LOAD] FC-SD checkpoint: {path} (feature_set={feature_set}, feature_dim={feature_dim})")
     return model
+
+
+def infer_bilstm_hidden_dims(state_dict: dict[str, torch.Tensor]) -> tuple[int, int, int]:
+    try:
+        h1 = int(state_dict["lstm1.weight_ih_l0"].shape[0] // 4)
+        h2 = int(state_dict["lstm2.weight_ih_l0"].shape[0] // 4)
+        h3 = int(state_dict["lstm3.weight_ih_l0"].shape[0] // 4)
+        if min(h1, h2, h3) > 0:
+            return h1, h2, h3
+    except KeyError:
+        pass
+    return 64, 32, 16
+
+
+def infer_bilstm_feature_dim(state_dict: dict[str, torch.Tensor]) -> int:
+    return int(state_dict["lstm1.weight_ih_l0"].shape[1])
 
 
 def load_bilstm_sd_model(
@@ -1000,15 +1360,32 @@ def load_bilstm_sd_model(
     cfg: dict[str, Any],
     group_size: int,
     device: torch.device,
+    args_feature_set: str,
 ) -> MuMimoBiLSTMSDNet:
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     n_fft = int(checkpoint.get("n_fft", cfg["n_fft"]))
     bps = int(checkpoint.get("bits_per_symbol", bits_per_symbol(str(cfg["modulation"]))))
     model_group_size = int(checkpoint.get("group_size", group_size))
-    model = MuMimoBiLSTMSDNet(n_fft, bps, model_group_size).to(device)
+    hidden_dims = tuple(
+        int(x)
+        for x in checkpoint.get(
+            "hidden_dims",
+            infer_bilstm_hidden_dims(checkpoint["state_dict"]),
+        )
+    )
+    feature_dim = int(checkpoint.get("feature_dim", infer_bilstm_feature_dim(checkpoint["state_dict"])))
+    feature_set = str(checkpoint.get("sd_feature_set", infer_sd_feature_set(feature_dim, "bilstm", args_feature_set)))
+    model = MuMimoBiLSTMSDNet(
+        n_fft,
+        bps,
+        model_group_size,
+        hidden_dims,
+        feature_dim=feature_dim,
+        sd_feature_set=feature_set,
+    ).to(device)
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
-    print(f"[LOAD] BiLSTM-SD checkpoint: {path}")
+    print(f"[LOAD] BiLSTM-SD checkpoint: {path} (feature_set={feature_set}, feature_dim={feature_dim})")
     return model
 
 
@@ -1018,6 +1395,8 @@ def predict_fc_sd_bits(
     y_d: np.ndarray,
     a_hat: np.ndarray,
     noise_power: np.ndarray,
+    snr_db: np.ndarray,
+    cond_a: np.ndarray,
     true_bits_shape: tuple[int, int, int, int],
     group_size: int,
     eps: float,
@@ -1030,7 +1409,10 @@ def predict_fc_sd_bits(
         a_hat=a_hat,
         bits=dummy_bits,
         noise_power=noise_power,
+        snr_db=snr_db,
+        cond_a=cond_a,
         group_size=group_size,
+        feature_set=str(model.sd_feature_set),
         eps=eps,
     )
     loader = DataLoader(TensorDataset(torch.from_numpy(x_np)), batch_size=int(batch_size), shuffle=False)
@@ -1058,6 +1440,7 @@ def predict_bilstm_sd_bits(
     a_hat: np.ndarray,
     noise_power: np.ndarray,
     snr_db: np.ndarray,
+    cond_a: np.ndarray,
     true_bits_shape: tuple[int, int, int, int],
     group_size: int,
     eps: float,
@@ -1071,7 +1454,9 @@ def predict_bilstm_sd_bits(
         bits=dummy_bits,
         noise_power=noise_power,
         snr_db=snr_db,
+        cond_a=cond_a,
         group_size=group_size,
+        feature_set=str(model.sd_feature_set),
         eps=eps,
     )
     loader = DataLoader(TensorDataset(torch.from_numpy(x_np)), batch_size=int(batch_size), shuffle=False)
@@ -1102,7 +1487,7 @@ def evaluate_one(
     *,
     path: Path,
     cfg: dict[str, Any],
-    ce_model: MuMimoCERefineNet,
+    ce_model: MuMimoCEModel,
     fc_model: MuMimoFCSDNet | None,
     bilstm_model: MuMimoBiLSTMSDNet | None,
     lmmse_weight: np.ndarray,
@@ -1199,6 +1584,8 @@ def evaluate_one(
             y_d=data["y_d"],
             a_hat=a_comnet,
             noise_power=data["noise_power"],
+            snr_db=data["snr_db"],
+            cond_a=data["cond_A"],
             true_bits_shape=bits.shape,
             group_size=int(args.group_size),
             eps=float(args.eps),
@@ -1213,6 +1600,7 @@ def evaluate_one(
             a_hat=a_comnet,
             noise_power=data["noise_power"],
             snr_db=data["snr_db"],
+            cond_a=data["cond_A"],
             true_bits_shape=bits.shape,
             group_size=int(args.group_size),
             eps=float(args.eps),
@@ -1221,6 +1609,15 @@ def evaluate_one(
         )
         ber["ComNet-BiLSTM"] = bit_error_rate(pred_bilstm, bits)
 
+    total_bit_count = int(bits.size)
+    bit_errors = {
+        key: None if value is None else int(round(float(value) * total_bit_count))
+        for key, value in ber.items()
+    }
+    total_bits = {
+        key: None if value is None else total_bit_count
+        for key, value in ber.items()
+    }
     a_mse = {
         "LS": channel_mse(data["a_ls"], data["a_true"]),
         "LMMSE": channel_mse(a_lmmse, data["a_true"]),
@@ -1256,6 +1653,8 @@ def evaluate_one(
         "a_nmse": a_nmse,
         "a_nmse_db": {key: to_db(value) for key, value in a_nmse.items()},
         "ber": ber,
+        "bit_errors": bit_errors,
+        "total_bits": total_bits,
         "condition": {
             "mean_cond_A": float(np.mean(cond)),
             "p95_cond_A": float(np.percentile(cond, 95.0)),
@@ -1269,6 +1668,8 @@ def save_eval_summary(result_dir: Path, cfg: dict[str, Any], results: list[dict[
         "a_mse_db": {},
         "a_nmse_db": {},
         "ber": {},
+        "bit_errors": {},
+        "total_bits": {},
         "condition": {},
     }
     for item in sorted(results, key=lambda x: x["snr"]):
@@ -1276,6 +1677,8 @@ def save_eval_summary(result_dir: Path, cfg: dict[str, Any], results: list[dict[
         summary["a_mse_db"][snr_key] = item["a_mse_db"]
         summary["a_nmse_db"][snr_key] = item["a_nmse_db"]
         summary["ber"][snr_key] = item["ber"]
+        summary["bit_errors"][snr_key] = item["bit_errors"]
+        summary["total_bits"][snr_key] = item["total_bits"]
         summary["condition"][snr_key] = item["condition"]
 
     result_dir.mkdir(parents=True, exist_ok=True)
@@ -1307,6 +1710,9 @@ def ordered_metric_names(names: Iterable[str], preferred: list[str]) -> list[str
 def save_eval_plots(result_dir: Path, summary: dict[str, Any]) -> None:
     result_dir.mkdir(parents=True, exist_ok=True)
     try:
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
     except Exception as exc:
         print(f"[WARN] matplotlib import failed, saving CSV plot data instead: {exc}")
@@ -1381,7 +1787,7 @@ def evaluate_all(
     *,
     dataset_dir: Path,
     cfg: dict[str, Any],
-    ce_model: MuMimoCERefineNet,
+    ce_model: MuMimoCEModel,
     fc_model: MuMimoFCSDNet | None,
     bilstm_model: MuMimoBiLSTMSDNet | None,
     lmmse_weight: np.ndarray,
@@ -1438,7 +1844,8 @@ def main() -> int:
     print(
         f"[CONFIG] modulation={cfg['modulation']}, n_fft={cfg['n_fft']}, "
         f"n_users={n_users}, n_streams={n_streams}, n_rx_per_ue={n_rx_per_ue}, "
-        f"group_size={args.group_size}, sd_type={args.sd_type}"
+        f"group_size={args.group_size}, ce_type={args.ce_type}, sd_type={args.sd_type}, "
+        f"sd_feature_set={args.sd_feature_set}"
     )
     if n_streams > n_rx_per_ue:
         print("[WARN] n_streams > n_rx_per_ue, ZF baselines and SD ZF features will be disabled.")
@@ -1450,7 +1857,7 @@ def main() -> int:
         checkpoint_path=lmmse_checkpoint,
     )
 
-    ce_model: MuMimoCERefineNet | None = None
+    ce_model: MuMimoCEModel | None = None
     fc_model: MuMimoFCSDNet | None = None
     bilstm_model: MuMimoBiLSTMSDNet | None = None
 
@@ -1504,11 +1911,23 @@ def main() -> int:
 
     if args.mode == "eval":
         if args.sd_type in {"fc", "both"} and fc_checkpoint.exists():
-            fc_model = load_fc_sd_model(fc_checkpoint, cfg, int(args.group_size), device)
+            fc_model = load_fc_sd_model(
+                fc_checkpoint,
+                cfg,
+                int(args.group_size),
+                device,
+                str(args.sd_feature_set),
+            )
         elif args.sd_type in {"fc", "both"}:
             print(f"[WARN] FC-SD checkpoint not found, ComNet-FC will be skipped: {fc_checkpoint}")
         if args.sd_type in {"bilstm", "both"} and bilstm_checkpoint.exists():
-            bilstm_model = load_bilstm_sd_model(bilstm_checkpoint, cfg, int(args.group_size), device)
+            bilstm_model = load_bilstm_sd_model(
+                bilstm_checkpoint,
+                cfg,
+                int(args.group_size),
+                device,
+                str(args.sd_feature_set),
+            )
         elif args.sd_type in {"bilstm", "both"}:
             print(f"[WARN] BiLSTM-SD checkpoint not found, ComNet-BiLSTM will be skipped: {bilstm_checkpoint}")
 
