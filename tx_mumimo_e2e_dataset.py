@@ -42,6 +42,7 @@ class MuMimoE2EConfig:
     antenna_spacing_lambda: float = 0.5
     scm_angle_spread_deg: float = 3.0
     snr_train_db: float = 40.0
+    snr_train_db_list: tuple[float, ...] = (15, 20, 25, 30, 35, 40)
     snr_test_db: tuple[float, ...] = (0, 5, 10, 15, 20, 25, 30, 35, 40)
     n_train_frames: int = 50000
     n_val_frames: int = 10000
@@ -92,6 +93,8 @@ class MuMimoE2EConfig:
             raise ValueError("clip_ratio must be positive")
         if self.pilot_kind not in {"ones", "qpsk"}:
             raise ValueError("pilot_kind must be one of ones, qpsk")
+        if len(self.snr_train_db_list) == 0:
+            raise ValueError("snr_train_db_list must not be empty")
         if min(self.n_train_frames, self.n_val_frames, self.n_test_frames_per_snr) < 0:
             raise ValueError("frame counts must be non-negative")
 
@@ -113,7 +116,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--carrier-freq-hz", type=float, default=800e6)
     parser.add_argument("--antenna-spacing-lambda", type=float, default=0.5)
     parser.add_argument("--scm-angle-spread-deg", type=float, default=3.0)
-    parser.add_argument("--snr-train-db", type=float, default=40.0)
+    parser.add_argument(
+        "--snr-train-db",
+        type=float,
+        default=None,
+        help="Legacy single train/val SNR override. By default mixed train SNR 15 20 25 30 35 40 is used.",
+    )
+    parser.add_argument(
+        "--snr-train-db-list",
+        nargs="+",
+        type=float,
+        default=None,
+        help="Mixed SNR values for train/val frames. Defaults to 15 20 25 30 35 40.",
+    )
     parser.add_argument(
         "--snr-test-db",
         nargs="+",
@@ -265,106 +280,268 @@ def _condition_numbers(A_eff_true: np.ndarray) -> np.ndarray:
     return cond
 
 
+def _effective_sinr_db(
+    desired_power: np.ndarray,
+    inter_stream_power: np.ndarray,
+    noise_power: float,
+) -> np.ndarray:
+    effective_sinr_db = np.zeros(desired_power.shape[0], dtype=np.float32)
+    for user_id in range(desired_power.shape[0]):
+        sinr = float(desired_power[user_id]) / max(
+            float(inter_stream_power[user_id]) + float(noise_power),
+            1e-300,
+        )
+        effective_sinr_db[user_id] = float(linear_to_db(sinr))
+    return effective_sinr_db
+
+
+def _make_clean_frame(
+    *,
+    cfg: MuMimoE2EConfig,
+    x_p_freq: np.ndarray,
+    bps: int,
+    scm_generator: ScmChannelGenerator,
+    rng: np.random.Generator,
+) -> dict[str, np.ndarray | float]:
+    channel = scm_generator.generate_multiuser(cfg.n_users, rng)
+    h_time = channel.h_time
+    H_true = channel_frequency_response(h_time, n_fft=cfg.n_fft)
+    H_tx_est = add_csit_error(H_true, cfg, rng)
+    W_tx_analog, W_rx_analog = hybrid_steering_beams(
+        carrier_freq_hz=cfg.carrier_freq_hz,
+        tx_array=scm_generator.tx_array,
+        rx_array=scm_generator.rx_array,
+        selected_angles=channel.selected_angles,
+    )
+    G_tx_est, W_digital, W_precoder = hybrid_zf_precoder_context(
+        H_tx_est,
+        W_tx_analog,
+        W_rx_analog,
+        normalization=cfg.precoder_norm,
+    )
+    A_eff_true = np.einsum("kurt,kts->kurs", H_true, W_precoder).astype(np.complex64)
+
+    frame_bits = rng.integers(
+        0,
+        2,
+        size=(cfg.n_streams, cfg.n_fft, bps),
+        dtype=np.int8,
+    )
+    x_data = qam_modulate(frame_bits.reshape(-1), cfg.modulation).reshape(
+        cfg.n_streams,
+        cfg.n_fft,
+    )
+
+    x_tx_data_freq = precoded_tx_frequency(x_data, W_precoder)
+    x_tx_data_time = modulate_ofdm(x_tx_data_freq, cfg)
+    y_d_clean = apply_multipath_mimo(x_tx_data_time, h_time)
+    signal_power = float(np.mean(np.abs(y_d_clean) ** 2))
+
+    y_p_clean = np.zeros(
+        (cfg.n_streams, cfg.n_users, cfg.n_rx_per_ue, x_tx_data_time.shape[-1]),
+        dtype=np.complex64,
+    )
+    for pilot_slot in range(cfg.n_streams):
+        x_pilot = x_p_freq[pilot_slot]
+        x_tx_pilot_freq = precoded_tx_frequency(x_pilot, W_precoder)
+        x_tx_pilot_time = modulate_ofdm(x_tx_pilot_freq, cfg)
+        y_p_clean[pilot_slot] = apply_multipath_mimo(x_tx_pilot_time, h_time)
+
+    desired_power = np.zeros(cfg.n_users, dtype=np.float32)
+    inter_stream_power = np.zeros(cfg.n_users, dtype=np.float32)
+    for user_id in range(cfg.n_users):
+        desired = A_eff_true[:, user_id, :, user_id].T * x_data[user_id][None, :]
+        inter = np.zeros_like(desired)
+        for stream_id in range(cfg.n_streams):
+            if stream_id == user_id:
+                continue
+            inter += A_eff_true[:, user_id, :, stream_id].T * x_data[stream_id][None, :]
+        desired_power[user_id] = float(np.mean(np.abs(desired) ** 2))
+        inter_stream_power[user_id] = float(np.mean(np.abs(inter) ** 2))
+
+    return {
+        "y_d_clean": y_d_clean,
+        "y_p_clean": y_p_clean,
+        "x_data": x_data,
+        "frame_bits": frame_bits,
+        "H_true": H_true,
+        "G_tx_est": G_tx_est,
+        "W_precoder": W_precoder,
+        "W_digital": W_digital,
+        "W_tx_analog": W_tx_analog,
+        "W_rx_analog": W_rx_analog,
+        "scm_selected_angles": channel.selected_angles,
+        "scm_center_angles": channel.center_angles,
+        "A_eff_true": A_eff_true,
+        "signal_power": signal_power,
+        "desired_power": desired_power,
+        "inter_stream_power": inter_stream_power,
+        "cond_A": _condition_numbers(A_eff_true),
+    }
+
+
+def _write_noisy_frame(
+    *,
+    data: dict[str, np.ndarray],
+    frame_index: int,
+    clean: dict[str, np.ndarray | float],
+    y_d_time: np.ndarray,
+    y_p_time: np.ndarray,
+    snr_value: float,
+    noise_power: float,
+) -> None:
+    cond_A = clean["cond_A"]
+    desired_power = clean["desired_power"]
+    inter_stream_power = clean["inter_stream_power"]
+    if not isinstance(cond_A, np.ndarray):
+        raise TypeError("cond_A must be an ndarray")
+    if not isinstance(desired_power, np.ndarray) or not isinstance(inter_stream_power, np.ndarray):
+        raise TypeError("power metrics must be ndarrays")
+
+    data["rx_p_time"][frame_index] = y_p_time
+    data["rx_d_time"][frame_index] = y_d_time
+    data["x_d_freq"][frame_index] = clean["x_data"]
+    data["bits"][frame_index] = clean["frame_bits"]
+    data["H_true"][frame_index] = clean["H_true"]
+    data["G_tx_est"][frame_index] = clean["G_tx_est"]
+    data["W_precoder"][frame_index] = clean["W_precoder"]
+    data["W_digital"][frame_index] = clean["W_digital"]
+    data["W_tx_analog"][frame_index] = clean["W_tx_analog"]
+    data["W_rx_analog"][frame_index] = clean["W_rx_analog"]
+    data["scm_selected_angles"][frame_index] = clean["scm_selected_angles"]
+    data["scm_center_angles"][frame_index] = clean["scm_center_angles"]
+    data["A_eff_true"][frame_index] = clean["A_eff_true"]
+    data["snr_db"][frame_index] = snr_value
+    data["signal_power"][frame_index] = float(clean["signal_power"])
+    data["desired_power"][frame_index] = desired_power
+    data["inter_stream_power"][frame_index] = inter_stream_power
+    data["noise_power"][frame_index] = noise_power
+    data["effective_sinr_db"][frame_index] = _effective_sinr_db(
+        desired_power,
+        inter_stream_power,
+        noise_power,
+    )
+    data["cond_A"][frame_index] = cond_A
+    data["mean_cond_A"][frame_index] = float(np.mean(cond_A))
+    data["p95_cond_A"][frame_index] = float(np.percentile(cond_A, 95.0))
+
+
+def _apply_scaled_awgn(
+    clean: np.ndarray,
+    unit_noise: np.ndarray,
+    noise_power: float,
+) -> np.ndarray:
+    if noise_power <= 0.0:
+        return clean.astype(np.complex64, copy=True)
+    return (clean + unit_noise * math.sqrt(noise_power / 2.0)).astype(np.complex64)
+
+
 def _make_split_dataset(
     *,
     cfg: MuMimoE2EConfig,
     n_frames: int,
-    snr_db: float,
+    snr_db: float | Sequence[float],
     rng: np.random.Generator,
 ) -> dict[str, np.ndarray]:
     data = _empty_split(cfg, n_frames)
     bps = bits_per_symbol(cfg.modulation)
     scm_generator = build_scm_generator(cfg)
+    snr_values = np.asarray(snr_db, dtype=np.float32).reshape(-1)
+    if snr_values.size == 0:
+        raise ValueError("snr_db must contain at least one value")
+    if snr_values.size == 1:
+        frame_snr_db = np.full(n_frames, float(snr_values[0]), dtype=np.float32)
+    else:
+        frame_snr_db = rng.choice(snr_values, size=n_frames, replace=True).astype(np.float32)
 
     for frame_index in range(n_frames):
-        channel = scm_generator.generate_multiuser(cfg.n_users, rng)
-        h_time = channel.h_time
-        H_true = channel_frequency_response(h_time, n_fft=cfg.n_fft)
-        H_tx_est = add_csit_error(H_true, cfg, rng)
-        W_tx_analog, W_rx_analog = hybrid_steering_beams(
-            carrier_freq_hz=cfg.carrier_freq_hz,
-            tx_array=scm_generator.tx_array,
-            rx_array=scm_generator.rx_array,
-            selected_angles=channel.selected_angles,
+        snr_value = float(frame_snr_db[frame_index])
+        clean = _make_clean_frame(
+            cfg=cfg,
+            x_p_freq=data["x_p_freq"][frame_index],
+            bps=bps,
+            scm_generator=scm_generator,
+            rng=rng,
         )
-        G_tx_est, W_digital, W_precoder = hybrid_zf_precoder_context(
-            H_tx_est,
-            W_tx_analog,
-            W_rx_analog,
-            normalization=cfg.precoder_norm,
-        )
-        A_eff_true = np.einsum("kurt,kts->kurs", H_true, W_precoder).astype(np.complex64)
+        signal_power = float(clean["signal_power"])
+        noise_power = noise_power_from_snr(signal_power, snr_value)
+        y_d_time = add_awgn(clean["y_d_clean"], noise_power, rng)
 
-        frame_bits = rng.integers(
-            0,
-            2,
-            size=(cfg.n_streams, cfg.n_fft, bps),
-            dtype=np.int8,
-        )
-        x_data = qam_modulate(frame_bits.reshape(-1), cfg.modulation).reshape(
-            cfg.n_streams,
-            cfg.n_fft,
-        )
-
-        x_tx_data_freq = precoded_tx_frequency(x_data, W_precoder)
-        x_tx_data_time = modulate_ofdm(x_tx_data_freq, cfg)
-        y_d_clean = apply_multipath_mimo(x_tx_data_time, h_time)
-        signal_power = float(np.mean(np.abs(y_d_clean) ** 2))
-        noise_power = noise_power_from_snr(signal_power, snr_db)
-        y_d_time = add_awgn(y_d_clean, noise_power, rng)
-
-        y_p_time = np.zeros(
-            (cfg.n_streams, cfg.n_users, cfg.n_rx_per_ue, x_tx_data_time.shape[-1]),
-            dtype=np.complex64,
-        )
+        y_p_clean = clean["y_p_clean"]
+        if not isinstance(y_p_clean, np.ndarray):
+            raise TypeError("y_p_clean must be an ndarray")
+        y_p_time = np.zeros_like(y_p_clean)
         for pilot_slot in range(cfg.n_streams):
-            x_pilot = data["x_p_freq"][frame_index, pilot_slot]
-            x_tx_pilot_freq = precoded_tx_frequency(x_pilot, W_precoder)
-            x_tx_pilot_time = modulate_ofdm(x_tx_pilot_freq, cfg)
-            y_p_clean = apply_multipath_mimo(x_tx_pilot_time, h_time)
-            y_p_time[pilot_slot] = add_awgn(y_p_clean, noise_power, rng)
+            y_p_time[pilot_slot] = add_awgn(y_p_clean[pilot_slot], noise_power, rng)
 
-        desired_power = np.zeros(cfg.n_users, dtype=np.float32)
-        inter_stream_power = np.zeros(cfg.n_users, dtype=np.float32)
-        effective_sinr_db = np.zeros(cfg.n_users, dtype=np.float32)
-        for user_id in range(cfg.n_users):
-            desired = A_eff_true[:, user_id, :, user_id].T * x_data[user_id][None, :]
-            inter = np.zeros_like(desired)
-            for stream_id in range(cfg.n_streams):
-                if stream_id == user_id:
-                    continue
-                inter += A_eff_true[:, user_id, :, stream_id].T * x_data[stream_id][None, :]
-            desired_power[user_id] = float(np.mean(np.abs(desired) ** 2))
-            inter_stream_power[user_id] = float(np.mean(np.abs(inter) ** 2))
-            sinr = desired_power[user_id] / max(inter_stream_power[user_id] + noise_power, 1e-300)
-            effective_sinr_db[user_id] = float(linear_to_db(sinr))
-
-        cond_A = _condition_numbers(A_eff_true)
-
-        data["rx_p_time"][frame_index] = y_p_time
-        data["rx_d_time"][frame_index] = y_d_time
-        data["x_d_freq"][frame_index] = x_data
-        data["bits"][frame_index] = frame_bits
-        data["H_true"][frame_index] = H_true
-        data["G_tx_est"][frame_index] = G_tx_est
-        data["W_precoder"][frame_index] = W_precoder
-        data["W_digital"][frame_index] = W_digital
-        data["W_tx_analog"][frame_index] = W_tx_analog
-        data["W_rx_analog"][frame_index] = W_rx_analog
-        data["scm_selected_angles"][frame_index] = channel.selected_angles
-        data["scm_center_angles"][frame_index] = channel.center_angles
-        data["A_eff_true"][frame_index] = A_eff_true
-        data["snr_db"][frame_index] = float(snr_db)
-        data["signal_power"][frame_index] = signal_power
-        data["desired_power"][frame_index] = desired_power
-        data["inter_stream_power"][frame_index] = inter_stream_power
-        data["noise_power"][frame_index] = noise_power
-        data["effective_sinr_db"][frame_index] = effective_sinr_db
-        data["cond_A"][frame_index] = cond_A
-        data["mean_cond_A"][frame_index] = float(np.mean(cond_A))
-        data["p95_cond_A"][frame_index] = float(np.percentile(cond_A, 95.0))
+        _write_noisy_frame(
+            data=data,
+            frame_index=frame_index,
+            clean=clean,
+            y_d_time=y_d_time,
+            y_p_time=y_p_time,
+            snr_value=snr_value,
+            noise_power=noise_power,
+        )
 
     return data
+
+
+def _make_paired_test_datasets(
+    *,
+    cfg: MuMimoE2EConfig,
+    n_frames: int,
+    snr_db_values: Sequence[float],
+    rng: np.random.Generator,
+) -> dict[float, dict[str, np.ndarray]]:
+    snr_values = [float(value) for value in snr_db_values]
+    if len(snr_values) == 0:
+        raise ValueError("snr_db_values must contain at least one value")
+    if len(set(snr_values)) != len(snr_values):
+        raise ValueError("snr_db_values must not contain duplicates")
+
+    datasets = {snr_value: _empty_split(cfg, n_frames) for snr_value in snr_values}
+    reference_data = datasets[snr_values[0]]
+    bps = bits_per_symbol(cfg.modulation)
+    scm_generator = build_scm_generator(cfg)
+
+    for frame_index in range(n_frames):
+        clean = _make_clean_frame(
+            cfg=cfg,
+            x_p_freq=reference_data["x_p_freq"][frame_index],
+            bps=bps,
+            scm_generator=scm_generator,
+            rng=rng,
+        )
+
+        y_d_clean = clean["y_d_clean"]
+        y_p_clean = clean["y_p_clean"]
+        if not isinstance(y_d_clean, np.ndarray) or not isinstance(y_p_clean, np.ndarray):
+            raise TypeError("clean waveforms must be ndarrays")
+
+        data_noise_unit = (
+            rng.standard_normal(y_d_clean.shape) + 1j * rng.standard_normal(y_d_clean.shape)
+        ).astype(np.complex64)
+        pilot_noise_unit = (
+            rng.standard_normal(y_p_clean.shape) + 1j * rng.standard_normal(y_p_clean.shape)
+        ).astype(np.complex64)
+
+        signal_power = float(clean["signal_power"])
+        for snr_value in snr_values:
+            noise_power = noise_power_from_snr(signal_power, snr_value)
+            y_d_time = _apply_scaled_awgn(y_d_clean, data_noise_unit, noise_power)
+            y_p_time = _apply_scaled_awgn(y_p_clean, pilot_noise_unit, noise_power)
+            _write_noisy_frame(
+                data=datasets[snr_value],
+                frame_index=frame_index,
+                clean=clean,
+                y_d_time=y_d_time,
+                y_p_time=y_p_time,
+                snr_value=snr_value,
+                noise_power=noise_power,
+            )
+
+    return datasets
 
 
 def _save_npz(path: Path, dataset: dict[str, np.ndarray]) -> None:
@@ -385,10 +562,20 @@ def _snr_name(snr_db: float) -> str:
     return str(snr_db).replace("-", "m").replace(".", "p")
 
 
+def _snr_set_name(snr_db: float | Sequence[float]) -> str:
+    values = np.asarray(snr_db, dtype=np.float32).reshape(-1)
+    if values.size == 0:
+        raise ValueError("snr_db must contain at least one value")
+    if values.size == 1:
+        return _snr_name(float(values[0]))
+    return f"{_snr_name(float(np.min(values)))}_{_snr_name(float(np.max(values)))}mixed"
+
+
 def write_config(out_dir: Path, cfg: MuMimoE2EConfig) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "config.json"
     data = asdict(cfg)
+    data["snr_train_db_list"] = list(cfg.snr_train_db_list)
     data["snr_test_db"] = list(cfg.snr_test_db)
     data["n_streams"] = cfg.n_streams
     data["waveform_type"] = "raw_mumimo_e2e"
@@ -416,6 +603,10 @@ def write_config(out_dir: Path, cfg: MuMimoE2EConfig) -> Path:
         "complex per-antenna variance sigma2; generated as sqrt(sigma2/2)*(n_re+j*n_im)"
     )
     data["snr_definition"] = "sigma2 = mean(|raw received data waveform before AWGN|^2) / 10^(snr_db/10)"
+    data["test_snr_policy"] = (
+        "paired base frames: test_snr*.npz files share the same channel, bits, precoder, "
+        "clean data waveform, and clean pilot waveform per frame; only AWGN scale changes by SNR"
+    )
     data["receiver_compatibility"] = "raw UE antenna-domain waveform; use rx_mumimo_receiver.py"
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -430,33 +621,45 @@ def generate_all(cfg: MuMimoE2EConfig, out_dir: Path) -> None:
     write_config(out_dir, cfg)
 
     rng = np.random.default_rng(cfg.seed)
+    train_snr_db = tuple(float(x) for x in cfg.snr_train_db_list)
+    train_snr_name = _snr_set_name(train_snr_db)
     train = _make_split_dataset(
         cfg=cfg,
         n_frames=cfg.n_train_frames,
-        snr_db=cfg.snr_train_db,
+        snr_db=train_snr_db,
         rng=rng,
     )
-    _save_npz(out_dir / f"train_snr{_snr_name(cfg.snr_train_db)}.npz", train)
+    _save_npz(out_dir / f"train_snr{train_snr_name}.npz", train)
 
     val = _make_split_dataset(
         cfg=cfg,
         n_frames=cfg.n_val_frames,
-        snr_db=cfg.snr_train_db,
+        snr_db=train_snr_db,
         rng=rng,
     )
-    _save_npz(out_dir / f"val_snr{_snr_name(cfg.snr_train_db)}.npz", val)
+    _save_npz(out_dir / f"val_snr{train_snr_name}.npz", val)
 
+    test_sets = _make_paired_test_datasets(
+        cfg=cfg,
+        n_frames=cfg.n_test_frames_per_snr,
+        snr_db_values=cfg.snr_test_db,
+        rng=rng,
+    )
     for snr_db in cfg.snr_test_db:
-        test = _make_split_dataset(
-            cfg=cfg,
-            n_frames=cfg.n_test_frames_per_snr,
-            snr_db=float(snr_db),
-            rng=rng,
-        )
+        test = test_sets[float(snr_db)]
         _save_npz(out_dir / f"test_snr{_snr_name(float(snr_db))}.npz", test)
 
 
 def build_config(args: argparse.Namespace) -> MuMimoE2EConfig:
+    if args.snr_train_db_list is None:
+        if args.snr_train_db is None:
+            snr_train_db_list: Sequence[float] = MuMimoE2EConfig.snr_train_db_list
+        else:
+            snr_train_db_list = (float(args.snr_train_db),)
+    else:
+        snr_train_db_list = tuple(float(x) for x in args.snr_train_db_list)
+    snr_train_db = float(args.snr_train_db) if args.snr_train_db is not None else float(tuple(snr_train_db_list)[-1])
+
     if args.snr_test_db is None:
         snr_test_db: Sequence[float] = MuMimoE2EConfig.snr_test_db
     else:
@@ -475,7 +678,8 @@ def build_config(args: argparse.Namespace) -> MuMimoE2EConfig:
         carrier_freq_hz=float(args.carrier_freq_hz),
         antenna_spacing_lambda=float(args.antenna_spacing_lambda),
         scm_angle_spread_deg=float(args.scm_angle_spread_deg),
-        snr_train_db=float(args.snr_train_db),
+        snr_train_db=snr_train_db,
+        snr_train_db_list=tuple(snr_train_db_list),
         snr_test_db=tuple(snr_test_db),
         n_train_frames=int(args.n_train_frames),
         n_val_frames=int(args.n_val_frames),

@@ -16,6 +16,8 @@
 - BiLSTM-SD 기본 hidden size를 `20 10 6`에서 `64 32 16`으로 키우고, BiLSTM 전용 LR step 기본값을 `100`, epoch 기본값을 `300`으로 조정했다.
 - CE 기본 모델을 기존 linear 보정에서 `base + residual MLP` 구조의 `resmlp`로 바꿨다. 기본값은 `--ce-hidden-dim 512 --ce-dropout 0.05`이다.
 - SDNet 입력에 `--sd-feature-set reliability`를 추가해 ZF/MMSE 추정값, full-stream residual, gain, cond(A), noise/SNR feature를 함께 사용한다.
+- TX train/val 기본 SNR을 단일 40 dB에서 `15 20 25 30 35 40` mixed-SNR로 변경했다.
+- test SNR sweep을 paired base frame 방식으로 변경했다. `test_snr*.npz` 파일들은 같은 bits/channel/precoder/clean waveform을 공유하고 SNR별 AWGN 크기만 다르게 저장한다.
 - `csit_error_var` 기본값을 `0.005`로 변경했다.
 - clipping 조건에서 all-ones pilot이 channel estimation floor를 만들 수 있음을 확인하고, `--pilot-kind qpsk`를 기본 pilot 방향으로 정리했다.
 - `mumimo_phy/` 패키지를 추가해 OFDM, QAM, noise, SCM, beamforming을 모듈화했다.
@@ -37,15 +39,17 @@ n_rays_per_path = 15
 channel_model = SCM-style clustered multipath
 csit_error_var = 0.005
 case = clipping
-clip_ratio = 2.0 또는 3.0
+clip_ratio = 1.6
 pilot_kind = qpsk
+train_snr_db_list = 15 20 25 30 35 40
+test_snr_policy = paired base frames, SNR별 AWGN scale만 변경
 ```
 
 현재 권장 명령어:
 
 ```powershell
-python tx_mumimo_e2e_dataset.py --out-dir outputs_mumimo_e2e_64qam_scm_csit005_clip20 --modulation 64QAM --case clipping --clip-ratio 2.0 --pilot-kind qpsk --n-train-frames 5000 --n-val-frames 1000 --n-test-frames-per-snr 1000
-python rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_scm_csit005_clip20 --result-dir results_mumimo_e2e_64qam_scm_csit005_clip20_reliability --mode train-all --sd-type both --sd-feature-set reliability --ce-type resmlp --ce-hidden-dim 512 --ce-dropout 0.05 --sd-epochs 150 --bilstm-epochs 300 --device cuda
+python tx_mumimo_e2e_dataset.py --out-dir outputs_mumimo_e2e_64qam_scm_csit005_clip16_mixed15_40 --modulation 64QAM --n-train-frames 5000 --n-val-frames 1000 --n-test-frames-per-snr 1000
+python rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_scm_csit005_clip16_mixed15_40 --result-dir results_mumimo_e2e_64qam_scm_csit005_clip16_mixed15_40_bilstm --mode train-all --sd-type bilstm --sd-feature-set reliability --ce-type resmlp --bilstm-epochs 300 --device cuda
 ```
 
 ## 다음 작업
@@ -110,24 +114,15 @@ error count / total bit count
 - residual multi-user interference 증가 확인
 - `True-H` baseline과 LS/LMMSE/ComNet 차이 확인
 
-### 5. Mixed-SNR 학습
+### 5. Mixed-SNR 학습 검증
 
-현재 train split은 기본적으로 `snr_train_db=40` 단일 SNR 중심이다.
+현재 train/val split은 기본적으로 `snr_train_db_list = 15 20 25 30 35 40`에서 frame마다 SNR을 랜덤 선택한다.
 
-추가할 기능:
-
-- train SNR list 옵션 추가
-- frame마다 다른 SNR로 train split 생성
-- 예시 옵션:
-
-```text
---snr-train-db-list 0 5 10 15 20 25 30 35 40
-```
-
-기대 효과:
+확인할 내용:
 
 - BiLSTM이 40 dB에 과하게 맞춰지는 문제 완화
-- 10~30 dB 구간 일반화 개선
+- 15~35 dB 구간 일반화 개선
+- 단일 40 dB train과 mixed-SNR train BER 비교
 
 ### 6. RX 결과 기록 개선
 

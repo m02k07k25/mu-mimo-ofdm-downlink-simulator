@@ -11,6 +11,8 @@
 - MATLAB `copy/SCM.m`, `copy/steer_precoding.m`, `copy/ZF_precoding.m`에서 쓰던 기본 아이디어를 Python 모듈로 분리했습니다.
 - 기본 `csit_error_var`는 `0.005`입니다.
 - 기본 pilot은 `qpsk`입니다. 데이터 변조는 그대로 `16QAM` 또는 `64QAM`입니다.
+- 기본 train/val SNR은 `15 20 25 30 35 40` mixed-SNR입니다.
+- test SNR sweep은 paired base frame 방식입니다. `test_snr20.npz`, `test_snr40.npz`처럼 SNR만 다른 test 파일들은 같은 bits/channel/precoder/clean waveform을 공유하고 AWGN 크기만 다릅니다.
 - `rx_mumimo_receiver.py`는 pilot으로 effective channel을 추정하고, ZF/MMSE/ComNet receiver를 학습 및 평가합니다.
 
 ## 폴더 구조
@@ -47,14 +49,14 @@ TX 데이터셋 생성:
 
 ```powershell
 conda activate torch_mk
-python tx_mumimo_e2e_dataset.py --out-dir outputs_mumimo_e2e_64qam_scm_csit005_clip20 --modulation 64QAM --case clipping --clip-ratio 2.0 --pilot-kind qpsk --n-train-frames 5000 --n-val-frames 1000 --n-test-frames-per-snr 1000
+python tx_mumimo_e2e_dataset.py --out-dir outputs_mumimo_e2e_64qam_scm_csit005_clip16_mixed15_40 --modulation 64QAM --n-train-frames 5000 --n-val-frames 1000 --n-test-frames-per-snr 1000
 ```
 
 RX 학습/평가:
 
 ```powershell
 conda activate torch_mk
-python rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_scm_csit005_clip20 --result-dir results_mumimo_e2e_64qam_scm_csit005_clip20_reliability --mode train-all --sd-type both --sd-feature-set reliability --ce-type resmlp --ce-hidden-dim 512 --ce-dropout 0.05 --sd-epochs 150 --bilstm-epochs 300 --device cuda
+python rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_scm_csit005_clip16_mixed15_40 --result-dir results_mumimo_e2e_64qam_scm_csit005_clip16_mixed15_40_bilstm --mode train-all --sd-type bilstm --sd-feature-set reliability --ce-type resmlp --bilstm-epochs 300 --device cuda
 ```
 
 작게 동작 확인만 할 때:
@@ -257,6 +259,18 @@ threshold = clip_ratio * RMS(time_symbol)
 
 Clipping은 PAPR을 줄이는 대신 신호를 왜곡합니다. 특히 pilot이 왜곡되면 channel estimation이 나빠질 수 있습니다.
 
+### Test SNR Pairing
+
+`test_snr*.npz` 파일들은 이제 같은 base frame을 기준으로 생성됩니다.
+
+```text
+same channel / bits / precoder / clean received waveform
+-> SNR별 AWGN scale만 변경
+-> test_snr00.npz, test_snr05.npz, ..., test_snr40.npz 저장
+```
+
+그래서 35 dB와 40 dB를 비교할 때 channel이나 bit 조합이 달라서 생기는 흔들림이 줄어듭니다. BER이 여전히 완전히 단조 감소하지 않을 수는 있지만, 그 경우는 noise realization, clipping distortion, detector 학습 상태, test bit 수의 통계 오차를 봐야 합니다.
+
 ### ZF와 MMSE
 
 ZF, Zero Forcing은 다른 stream의 간섭을 0으로 만들려고 하는 검출/precoding 방식입니다. 채널이 나쁘거나 noise가 크면 noise까지 키울 수 있습니다.
@@ -276,7 +290,8 @@ MMSE는 간섭 제거와 noise 증폭 사이에서 균형을 잡습니다. 낮�
 --case                    linear, cp_removal, clipping
 --clip-ratio              clipping threshold 계수
 --pilot-kind              ones 또는 qpsk
---snr-train-db            train/val SNR
+--snr-train-db-list       train/val mixed SNR, 기본 15 20 25 30 35 40
+--snr-train-db            단일 train/val SNR로 되돌릴 때 쓰는 legacy override
 --snr-test-db             test SNR sweep
 --ce-type                 CE 모델 선택, 기본 resmlp
 --ce-hidden-dim           Residual MLP CE hidden size, 기본 512
@@ -321,11 +336,11 @@ rx_mumimo_receiver.py
 
 ## 현재 권장 실험
 
-64QAM, SCM channel, CSIT error 0.005, clipping ratio 2.0:
+64QAM, SCM channel, CSIT error 0.005, clipping ratio 1.6, train mixed SNR 15~40 dB:
 
 ```powershell
-python tx_mumimo_e2e_dataset.py --out-dir outputs_mumimo_e2e_64qam_scm_csit005_clip20 --modulation 64QAM --case clipping --clip-ratio 2.0 --pilot-kind qpsk --n-train-frames 5000 --n-val-frames 1000 --n-test-frames-per-snr 1000
-python rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_scm_csit005_clip20 --result-dir results_mumimo_e2e_64qam_scm_csit005_clip20_reliability --mode train-all --sd-type both --sd-feature-set reliability --ce-type resmlp --ce-hidden-dim 512 --ce-dropout 0.05 --sd-epochs 150 --bilstm-epochs 300 --device cuda
+python tx_mumimo_e2e_dataset.py --out-dir outputs_mumimo_e2e_64qam_scm_csit005_clip16_mixed15_40 --modulation 64QAM --n-train-frames 5000 --n-val-frames 1000 --n-test-frames-per-snr 1000
+python rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_scm_csit005_clip16_mixed15_40 --result-dir results_mumimo_e2e_64qam_scm_csit005_clip16_mixed15_40_bilstm --mode train-all --sd-type bilstm --sd-feature-set reliability --ce-type resmlp --bilstm-epochs 300 --device cuda
 ```
 
 ## 주의
