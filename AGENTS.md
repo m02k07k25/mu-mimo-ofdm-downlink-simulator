@@ -15,3 +15,7 @@ Common commands:
 python tx_comnet_ofdm_dataset.py --out-dir outputs_comnet --modulation 16QAM
 python rx_comnet_receiver.py --dataset-dir outputs_comnet --result-dir results_comnet --mode train-all --device cuda
 ```
+
+Command formatting preference:
+
+- When giving commands to the user, provide single-line commands without PowerShell backtick line continuations.
