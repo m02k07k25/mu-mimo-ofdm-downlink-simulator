@@ -6,6 +6,13 @@ from .beamforming import (
     steering_precoder,
     zf_precoder,
 )
+from .helper import (
+    apply_common_phase_rotation,
+    apply_iq_imbalance,
+    apply_rf_impairments,
+    rf_impairment_real_matrix,
+    rf_impairment_widely_linear_coefficients,
+)
 from .modulation import bits_per_symbol, qam_modulate
 from .noise import add_awgn, db_to_linear, linear_to_db, noise_power_from_snr
 from .ofdm import apply_clipping, ofdm_modulate_freq, precoded_tx_frequency
@@ -22,7 +29,10 @@ __all__ = [
     "ScmChannelGenerator",
     "add_awgn",
     "apply_clipping",
+    "apply_common_phase_rotation",
+    "apply_iq_imbalance",
     "apply_multipath_mimo",
+    "apply_rf_impairments",
     "bits_per_symbol",
     "channel_frequency_response",
     "db_to_linear",
@@ -34,6 +44,8 @@ __all__ = [
     "ofdm_modulate_freq",
     "precoded_tx_frequency",
     "qam_modulate",
+    "rf_impairment_real_matrix",
+    "rf_impairment_widely_linear_coefficients",
     "steering_precoder",
     "zf_precoder",
 ]

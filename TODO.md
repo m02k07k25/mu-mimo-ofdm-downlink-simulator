@@ -18,6 +18,8 @@
 - SDNet 입력에 `--sd-feature-set reliability`를 추가해 ZF/MMSE 추정값, full-stream residual, gain, cond(A), noise/SNR feature를 함께 사용한다.
 - TX train/val 기본 SNR을 단일 40 dB에서 `15 20 25 30 35 40` mixed-SNR로 변경했다.
 - test SNR sweep을 paired base frame 방식으로 변경했다. `test_snr*.npz` 파일들은 같은 bits/channel/precoder/clean waveform을 공유하고 SNR별 AWGN 크기만 다르게 저장한다.
+- `mumimo_phy/helper/`에 RF impairment helper를 추가했다. RX I/Q gain imbalance, I/Q phase error, common phase rotation은 기본 실험 조건으로 켠다.
+- RF impairment용 `RF-aware True-H WL-MMSE` oracle baseline을 추가했다. I/Q imbalance의 mirror-subcarrier leakage를 고려해 subcarrier pair 단위 widely-linear MMSE로 검출한다.
 - `csit_error_var` 기본값을 `0.005`로 변경했다.
 - clipping 조건에서 all-ones pilot이 channel estimation floor를 만들 수 있음을 확인하고, `--pilot-kind qpsk`를 기본 pilot 방향으로 정리했다.
 - `mumimo_phy/` 패키지를 추가해 OFDM, QAM, noise, SCM, beamforming을 모듈화했다.
@@ -43,6 +45,9 @@ clip_ratio = 1.6
 pilot_kind = qpsk
 train_snr_db_list = 15 20 25 30 35 40
 test_snr_policy = paired base frames, SNR별 AWGN scale만 변경
+rx_iq_gain_imbalance_db = 0.5
+rx_iq_phase_error_deg = 3.0
+rx_common_phase_error_deg = 5.0
 ```
 
 현재 권장 명령어:

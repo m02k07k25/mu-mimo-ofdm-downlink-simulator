@@ -15,6 +15,7 @@ from mumimo_phy import (
     ScmChannelGenerator,
     add_awgn,
     apply_multipath_mimo,
+    apply_rf_impairments,
     bits_per_symbol,
     channel_frequency_response,
     hybrid_steering_beams,
@@ -24,6 +25,7 @@ from mumimo_phy import (
     ofdm_modulate_freq,
     precoded_tx_frequency,
     qam_modulate,
+    rf_impairment_widely_linear_coefficients,
 )
 
 
@@ -52,6 +54,9 @@ class MuMimoE2EConfig:
     case: str = "clipping"
     clip_ratio: float = 1.6
     pilot_kind: str = "qpsk"
+    rx_iq_gain_imbalance_db: float = 0.5
+    rx_iq_phase_error_deg: float = 3.0
+    rx_common_phase_error_deg: float = 5.0
     seed: int = 7
 
     @property
@@ -93,6 +98,12 @@ class MuMimoE2EConfig:
             raise ValueError("clip_ratio must be positive")
         if self.pilot_kind not in {"ones", "qpsk"}:
             raise ValueError("pilot_kind must be one of ones, qpsk")
+        if not math.isfinite(self.rx_iq_gain_imbalance_db):
+            raise ValueError("rx_iq_gain_imbalance_db must be finite")
+        if not math.isfinite(self.rx_iq_phase_error_deg):
+            raise ValueError("rx_iq_phase_error_deg must be finite")
+        if not math.isfinite(self.rx_common_phase_error_deg):
+            raise ValueError("rx_common_phase_error_deg must be finite")
         if len(self.snr_train_db_list) == 0:
             raise ValueError("snr_train_db_list must not be empty")
         if min(self.n_train_frames, self.n_val_frames, self.n_test_frames_per_snr) < 0:
@@ -155,6 +166,24 @@ def parse_args() -> argparse.Namespace:
         choices=["ones", "qpsk"],
         help="Pilot sequence on active stream slots. qpsk avoids the high-PAPR all-ones OFDM impulse.",
     )
+    parser.add_argument(
+        "--rx-iq-gain-imbalance-db",
+        type=float,
+        default=0.5,
+        help="Receiver I/Q amplitude gain difference in dB. Positive means I gain > Q gain.",
+    )
+    parser.add_argument(
+        "--rx-iq-phase-error-deg",
+        type=float,
+        default=3.0,
+        help="Receiver I/Q quadrature phase error in degrees from ideal 90-degree separation.",
+    )
+    parser.add_argument(
+        "--rx-common-phase-error-deg",
+        type=float,
+        default=5.0,
+        help="Receiver common phase rotation in degrees applied to pilot and data waveforms.",
+    )
     parser.add_argument("--seed", type=int, default=7)
     return parser.parse_args()
 
@@ -209,6 +238,15 @@ def modulate_ofdm(freq_symbol: np.ndarray, cfg: MuMimoE2EConfig) -> np.ndarray:
         n_cp=cfg.n_cp,
         case=cfg.case,
         clip_ratio=cfg.clip_ratio,
+    )
+
+
+def apply_rx_rf_impairments(waveform: np.ndarray, cfg: MuMimoE2EConfig) -> np.ndarray:
+    return apply_rf_impairments(
+        waveform,
+        iq_gain_imbalance_db=cfg.rx_iq_gain_imbalance_db,
+        iq_phase_error_deg=cfg.rx_iq_phase_error_deg,
+        common_phase_error_deg=cfg.rx_common_phase_error_deg,
     )
 
 
@@ -334,7 +372,7 @@ def _make_clean_frame(
 
     x_tx_data_freq = precoded_tx_frequency(x_data, W_precoder)
     x_tx_data_time = modulate_ofdm(x_tx_data_freq, cfg)
-    y_d_clean = apply_multipath_mimo(x_tx_data_time, h_time)
+    y_d_clean = apply_rx_rf_impairments(apply_multipath_mimo(x_tx_data_time, h_time), cfg)
     signal_power = float(np.mean(np.abs(y_d_clean) ** 2))
 
     y_p_clean = np.zeros(
@@ -345,7 +383,10 @@ def _make_clean_frame(
         x_pilot = x_p_freq[pilot_slot]
         x_tx_pilot_freq = precoded_tx_frequency(x_pilot, W_precoder)
         x_tx_pilot_time = modulate_ofdm(x_tx_pilot_freq, cfg)
-        y_p_clean[pilot_slot] = apply_multipath_mimo(x_tx_pilot_time, h_time)
+        y_p_clean[pilot_slot] = apply_rx_rf_impairments(
+            apply_multipath_mimo(x_tx_pilot_time, h_time),
+            cfg,
+        )
 
     desired_power = np.zeros(cfg.n_users, dtype=np.float32)
     inter_stream_power = np.zeros(cfg.n_users, dtype=np.float32)
@@ -603,6 +644,32 @@ def write_config(out_dir: Path, cfg: MuMimoE2EConfig) -> Path:
         "complex per-antenna variance sigma2; generated as sqrt(sigma2/2)*(n_re+j*n_im)"
     )
     data["snr_definition"] = "sigma2 = mean(|raw received data waveform before AWGN|^2) / 10^(snr_db/10)"
+    rf_alpha, rf_beta = rf_impairment_widely_linear_coefficients(
+        iq_gain_imbalance_db=cfg.rx_iq_gain_imbalance_db,
+        iq_phase_error_deg=cfg.rx_iq_phase_error_deg,
+        common_phase_error_deg=cfg.rx_common_phase_error_deg,
+    )
+    data["rf_impairments"] = {
+        "location": "receiver front-end, after multipath channel and before AWGN",
+        "enabled": bool(
+            cfg.rx_iq_gain_imbalance_db != 0.0
+            or cfg.rx_iq_phase_error_deg != 0.0
+            or cfg.rx_common_phase_error_deg != 0.0
+        ),
+        "rx_iq_gain_imbalance_db": cfg.rx_iq_gain_imbalance_db,
+        "rx_iq_phase_error_deg": cfg.rx_iq_phase_error_deg,
+        "rx_common_phase_error_deg": cfg.rx_common_phase_error_deg,
+        "widely_linear_model": "y_rf = alpha * y_channel + beta * conj(y_channel)",
+        "alpha": {"real": float(rf_alpha.real), "imag": float(rf_alpha.imag)},
+        "beta": {"real": float(rf_beta.real), "imag": float(rf_beta.imag)},
+        "default_policy": "enabled by default for RF stress testing; use the True-H WL-MMSE receiver baseline as the RF-aware oracle",
+        "mild_stress_test_example": "0.5 dB I/Q gain imbalance, 3 degree I/Q phase error, 5 degree common phase rotation",
+        "nonzero_warning": (
+            "I/Q imbalance is a widely-linear RF impairment. With nonzero RF impairment, "
+            "A_eff_true remains the pre-RF linear effective channel, so plain True-H and "
+            "LMMSE channel-estimation baselines are no longer strict oracle references."
+        ),
+    }
     data["test_snr_policy"] = (
         "paired base frames: test_snr*.npz files share the same channel, bits, precoder, "
         "clean data waveform, and clean pilot waveform per frame; only AWGN scale changes by SNR"
@@ -689,6 +756,9 @@ def build_config(args: argparse.Namespace) -> MuMimoE2EConfig:
         case=str(args.case),
         clip_ratio=float(args.clip_ratio),
         pilot_kind=str(args.pilot_kind),
+        rx_iq_gain_imbalance_db=float(args.rx_iq_gain_imbalance_db),
+        rx_iq_phase_error_deg=float(args.rx_iq_phase_error_deg),
+        rx_common_phase_error_deg=float(args.rx_common_phase_error_deg),
         seed=int(args.seed),
     )
 

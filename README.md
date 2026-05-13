@@ -13,6 +13,7 @@
 - 기본 pilot은 `qpsk`입니다. 데이터 변조는 그대로 `16QAM` 또는 `64QAM`입니다.
 - 기본 train/val SNR은 `15 20 25 30 35 40` mixed-SNR입니다.
 - test SNR sweep은 paired base frame 방식입니다. `test_snr20.npz`, `test_snr40.npz`처럼 SNR만 다른 test 파일들은 같은 bits/channel/precoder/clean waveform을 공유하고 AWGN 크기만 다릅니다.
+- RX front-end RF impairment는 기본으로 켜져 있습니다. 기본값은 I/Q gain imbalance `0.5 dB`, I/Q phase error `3 deg`, common phase rotation `5 deg`입니다.
 - `rx_mumimo_receiver.py`는 pilot으로 effective channel을 추정하고, ZF/MMSE/ComNet receiver를 학습 및 평가합니다.
 
 ## 폴더 구조
@@ -80,6 +81,7 @@ random bits
 -> digital ZF precoder 생성
 -> OFDM IFFT, clipping, CP 삽입
 -> multipath MIMO channel 통과
+-> RX I/Q imbalance와 common phase rotation 적용
 -> AWGN noise 추가
 -> .npz dataset 저장
 ```
@@ -134,8 +136,9 @@ LMMSE-MMSE             LMMSE channel estimate + MMSE detector, 주요 classical 
 ComNet-CE-ZF-Hard      ComNet CE가 보정한 channel + ZF detector + hard QAM decision
 ComNet-FC              ComNet CE channel + FC symbol detector
 ComNet-BiLSTM          ComNet CE channel + BiLSTM symbol detector
-True-H ZF              실제 effective channel A_eff_true를 알고 있다고 가정한 ZF oracle baseline
-True-H MMSE            실제 effective channel A_eff_true를 알고 있다고 가정한 MMSE oracle baseline
+Pre-RF True-H ZF       RF 전 effective channel A_eff_true를 알고 있다고 가정한 ZF baseline
+Pre-RF True-H MMSE     RF 전 effective channel A_eff_true를 알고 있다고 가정한 MMSE baseline
+RF-aware True-H WL-MMSE RF I/Q imbalance의 mirror-subcarrier leakage까지 반영한 widely-linear MMSE oracle baseline
 Desired-only MRC       target stream channel만 matched combining하고 stream 간섭 제거는 하지 않는 sanity baseline
 ```
 
@@ -259,6 +262,41 @@ threshold = clip_ratio * RMS(time_symbol)
 
 Clipping은 PAPR을 줄이는 대신 신호를 왜곡합니다. 특히 pilot이 왜곡되면 channel estimation이 나빠질 수 있습니다.
 
+### RF Impairments
+
+RX front-end에서 생기는 I/Q 불일치와 공통 위상 회전을 기본 실험 조건으로 넣었습니다.
+
+```text
+I/Q gain imbalance       I와 Q 경로 gain이 서로 다른 오차, 기본 0.5 dB
+I/Q phase error          I와 Q가 정확히 90도가 아닌 오차, 기본 3 deg
+common phase rotation    복소 신호 전체가 회전하는 오차, 기본 5 deg
+```
+
+적용 위치는 channel 통과 이후, AWGN 추가 이전입니다. 즉 pilot과 data가 모두 같은 RX RF front-end 오차를 겪습니다.
+
+```text
+y_channel = H * x
+y_rf = RF_impairment(y_channel)
+y_rx = y_rf + noise
+```
+
+I/Q imbalance는 단순 phase rotation과 다릅니다. phase rotation은 `x * exp(j theta)`처럼 constellation 전체가 도는 오차이고, I/Q imbalance는 `x`와 `conj(x)` 계열 성분이 섞이는 widely-linear 왜곡입니다. OFDM FFT 이후에는 mirror subcarrier leakage도 생깁니다.
+
+중요한 주의점:
+
+```text
+Pre-RF True-H MMSE       A_eff_true = H*W만 쓰는 pre-RF linear baseline
+RF-aware True-H WL-MMSE  RF I/Q imbalance와 mirror-subcarrier leakage를 반영한 RF-aware oracle baseline
+```
+
+따라서 RF impairment를 켠 기본 실험에서는 `RF-aware True-H WL-MMSE`를 가장 정답에 가까운 oracle baseline으로 봅니다. 다만 clipping은 여전히 비선형 distortion이라, `RF-aware True-H WL-MMSE`도 완전한 ML oracle은 아닙니다.
+
+RF impairment를 끄고 기존 선형 기준만 보고 싶으면 TX에 다음 옵션을 추가합니다.
+
+```powershell
+--rx-iq-gain-imbalance-db 0 --rx-iq-phase-error-deg 0 --rx-common-phase-error-deg 0
+```
+
 ### Test SNR Pairing
 
 `test_snr*.npz` 파일들은 이제 같은 base frame을 기준으로 생성됩니다.
@@ -290,6 +328,9 @@ MMSE는 간섭 제거와 noise 증폭 사이에서 균형을 잡습니다. 낮�
 --case                    linear, cp_removal, clipping
 --clip-ratio              clipping threshold 계수
 --pilot-kind              ones 또는 qpsk
+--rx-iq-gain-imbalance-db RX I/Q amplitude imbalance, 기본 0.5 dB
+--rx-iq-phase-error-deg   RX I/Q phase imbalance, 기본 3 deg
+--rx-common-phase-error-deg RX common phase rotation, 기본 5 deg
 --snr-train-db-list       train/val mixed SNR, 기본 15 20 25 30 35 40
 --snr-train-db            단일 train/val SNR로 되돌릴 때 쓰는 legacy override
 --snr-test-db             test SNR sweep
@@ -325,6 +366,12 @@ mumimo_phy/beamforming.py
 mumimo_phy/ofdm.py
   ofdm_modulate_freq        IFFT, clipping, CP 처리
 
+mumimo_phy/helper/impairments.py
+  apply_iq_imbalance        I/Q gain 및 phase imbalance 적용
+  apply_common_phase_rotation common phase rotation 적용
+  apply_rf_impairments      기본 RX RF impairment 묶음 적용
+  rf_impairment_widely_linear_coefficients RF-aware oracle용 alpha/beta 계수
+
 rx_mumimo_receiver.py
   preprocess_split          pilot/data를 FFT하고 LS channel 추정
   linear_detect             ZF/MMSE 검출
@@ -336,7 +383,7 @@ rx_mumimo_receiver.py
 
 ## 현재 권장 실험
 
-64QAM, SCM channel, CSIT error 0.005, clipping ratio 1.6, train mixed SNR 15~40 dB:
+64QAM, SCM channel, CSIT error 0.005, clipping ratio 1.6, RX RF impairment on, train mixed SNR 15~40 dB:
 
 ```powershell
 python tx_mumimo_e2e_dataset.py --out-dir outputs_mumimo_e2e_64qam_scm_csit005_clip16_mixed15_40 --modulation 64QAM --n-train-frames 5000 --n-val-frames 1000 --n-test-frames-per-snr 1000

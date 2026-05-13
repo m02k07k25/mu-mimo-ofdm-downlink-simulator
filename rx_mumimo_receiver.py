@@ -12,6 +12,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from mumimo_phy import rf_impairment_widely_linear_coefficients
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -494,6 +496,205 @@ def linear_detect_with_gain(
     return estimates.astype(np.complex64), gain.astype(np.complex64)
 
 
+def _complex_channel_real_matrix(a_eff: np.ndarray) -> np.ndarray:
+    a_eff = np.asarray(a_eff, dtype=np.complex64)
+    *leading, n_rx, n_streams = a_eff.shape
+    out = np.zeros((*leading, 2 * n_rx, 2 * n_streams), dtype=np.float32)
+    real = a_eff.real.astype(np.float32, copy=False)
+    imag = a_eff.imag.astype(np.float32, copy=False)
+    out[..., :n_rx, :n_streams] = real
+    out[..., :n_rx, n_streams:] = -imag
+    out[..., n_rx:, :n_streams] = imag
+    out[..., n_rx:, n_streams:] = real
+    return out
+
+
+def _conjugated_output_real_matrix(base: np.ndarray) -> np.ndarray:
+    out = np.array(base, copy=True)
+    n_rows = out.shape[-2]
+    n_rx = n_rows // 2
+    out[..., n_rx:, :] *= -1.0
+    return out
+
+
+def _apply_complex_scalar_to_real_rows(base: np.ndarray, scalar: complex) -> np.ndarray:
+    out = np.zeros_like(base, dtype=np.float32)
+    n_rows = base.shape[-2]
+    n_rx = n_rows // 2
+    real = float(np.real(scalar))
+    imag = float(np.imag(scalar))
+    real_rows = base[..., :n_rx, :]
+    imag_rows = base[..., n_rx:, :]
+    out[..., :n_rx, :] = real * real_rows - imag * imag_rows
+    out[..., n_rx:, :] = imag * real_rows + real * imag_rows
+    return out
+
+
+def _complex_grid_to_real(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.complex64)
+    return np.concatenate(
+        [values.real.astype(np.float32, copy=False), values.imag.astype(np.float32, copy=False)],
+        axis=-1,
+    )
+
+
+def _block_gain_compensate_real(
+    estimates: np.ndarray,
+    response: np.ndarray,
+    n_symbols: int,
+    eps: float,
+) -> np.ndarray:
+    corrected = np.array(estimates, copy=True)
+    half = corrected.shape[-1] // 2
+    eye2 = (float(eps) * np.eye(2, dtype=np.float32))[None, None, :, :]
+    for symbol_id in range(n_symbols):
+        idx_re = symbol_id
+        idx_im = half + symbol_id
+        block = np.empty((*response.shape[:-2], 2, 2), dtype=np.float32)
+        block[..., 0, 0] = response[..., idx_re, idx_re]
+        block[..., 0, 1] = response[..., idx_re, idx_im]
+        block[..., 1, 0] = response[..., idx_im, idx_re]
+        block[..., 1, 1] = response[..., idx_im, idx_im]
+        pair = np.stack([corrected[..., idx_re], corrected[..., idx_im]], axis=-1)
+        try:
+            pair = np.linalg.solve(block + eye2, pair[..., None])[..., 0]
+        except np.linalg.LinAlgError:
+            pair = np.matmul(np.linalg.pinv(block + eye2), pair[..., None])[..., 0]
+        corrected[..., idx_re] = pair[..., 0]
+        corrected[..., idx_im] = pair[..., 1]
+    return corrected
+
+
+def _solve_real_mmse(
+    b_matrix: np.ndarray,
+    y_real: np.ndarray,
+    noise_power: np.ndarray,
+    *,
+    method: str,
+    eps: float,
+    n_symbols: int,
+) -> np.ndarray:
+    bt = np.swapaxes(b_matrix, -1, -2)
+    gram = np.matmul(bt, b_matrix)
+    matched = np.matmul(bt, y_real[..., None])[..., 0]
+    dim = gram.shape[-1]
+    eye = np.eye(dim, dtype=np.float32)
+    if method == "zf":
+        system = gram + (float(eps) * eye)[None, None, :, :]
+    elif method == "mmse":
+        sigma2 = np.asarray(noise_power, dtype=np.float32).reshape(-1, 1, 1, 1)
+        system = gram + sigma2 * eye[None, None, :, :]
+    else:
+        raise ValueError(f"Unsupported detector: {method}")
+
+    try:
+        estimates = np.linalg.solve(system, matched[..., None])[..., 0]
+        response = np.linalg.solve(system, gram)
+    except np.linalg.LinAlgError:
+        pinv = np.linalg.pinv(system)
+        estimates = np.matmul(pinv, matched[..., None])[..., 0]
+        response = np.matmul(pinv, gram)
+    if method == "mmse":
+        estimates = _block_gain_compensate_real(estimates, response, n_symbols, eps)
+    return estimates.astype(np.float32)
+
+
+def rf_iq_wl_detect(
+    y_d: np.ndarray,
+    a_eff: np.ndarray,
+    noise_power: np.ndarray,
+    cfg: dict[str, Any],
+    *,
+    method: str,
+    eps: float,
+) -> np.ndarray | None:
+    n_frames, n_fft, n_users, n_rx = y_d.shape
+    n_streams = a_eff.shape[-1]
+    if method == "zf" and n_streams > n_rx:
+        return None
+
+    alpha, beta = rf_impairment_widely_linear_coefficients(
+        iq_gain_imbalance_db=float(cfg.get("rx_iq_gain_imbalance_db", 0.0)),
+        iq_phase_error_deg=float(cfg.get("rx_iq_phase_error_deg", 0.0)),
+        common_phase_error_deg=float(cfg.get("rx_common_phase_error_deg", 0.0)),
+    )
+    estimates = np.zeros((n_frames, n_fft, n_users, n_streams), dtype=np.complex64)
+    visited: set[int] = set()
+    frame_noise_power = np.asarray(noise_power, dtype=np.float32)
+
+    for subcarrier in range(n_fft):
+        if subcarrier in visited:
+            continue
+        mirror = (-subcarrier) % n_fft
+        visited.add(subcarrier)
+        visited.add(mirror)
+
+        a_k = a_eff[:, subcarrier]
+        c_k = _complex_channel_real_matrix(a_k)
+        y_k = _complex_grid_to_real(y_d[:, subcarrier])
+        if mirror == subcarrier:
+            c_k_conj = _conjugated_output_real_matrix(c_k)
+            b_matrix = (
+                _apply_complex_scalar_to_real_rows(c_k, alpha)
+                + _apply_complex_scalar_to_real_rows(c_k_conj, beta)
+            )
+            solved = _solve_real_mmse(
+                b_matrix,
+                y_k,
+                frame_noise_power,
+                method=method,
+                eps=eps,
+                n_symbols=n_streams,
+            )
+            estimates[:, subcarrier] = (
+                solved[..., :n_streams] + 1j * solved[..., n_streams:]
+            ).astype(np.complex64)
+            continue
+
+        a_m = a_eff[:, mirror]
+        c_m = _complex_channel_real_matrix(a_m)
+        c_k_conj = _conjugated_output_real_matrix(c_k)
+        c_m_conj = _conjugated_output_real_matrix(c_m)
+        y_m = _complex_grid_to_real(y_d[:, mirror])
+        y_pair = np.concatenate([y_k, y_m], axis=-1)
+
+        b_matrix = np.zeros(
+            (n_frames, n_users, 4 * n_rx, 4 * n_streams),
+            dtype=np.float32,
+        )
+        top_k = _apply_complex_scalar_to_real_rows(c_k, alpha)
+        top_m = _apply_complex_scalar_to_real_rows(c_m_conj, beta)
+        bottom_k = _apply_complex_scalar_to_real_rows(c_k_conj, beta)
+        bottom_m = _apply_complex_scalar_to_real_rows(c_m, alpha)
+
+        b_matrix[..., : 2 * n_rx, :n_streams] = top_k[..., :n_streams]
+        b_matrix[..., : 2 * n_rx, 2 * n_streams : 3 * n_streams] = top_k[..., n_streams:]
+        b_matrix[..., : 2 * n_rx, n_streams : 2 * n_streams] = top_m[..., :n_streams]
+        b_matrix[..., : 2 * n_rx, 3 * n_streams :] = top_m[..., n_streams:]
+        b_matrix[..., 2 * n_rx :, :n_streams] = bottom_k[..., :n_streams]
+        b_matrix[..., 2 * n_rx :, 2 * n_streams : 3 * n_streams] = bottom_k[..., n_streams:]
+        b_matrix[..., 2 * n_rx :, n_streams : 2 * n_streams] = bottom_m[..., :n_streams]
+        b_matrix[..., 2 * n_rx :, 3 * n_streams :] = bottom_m[..., n_streams:]
+
+        solved = _solve_real_mmse(
+            b_matrix,
+            y_pair,
+            frame_noise_power,
+            method=method,
+            eps=eps,
+            n_symbols=2 * n_streams,
+        )
+        estimates[:, subcarrier] = (
+            solved[..., :n_streams] + 1j * solved[..., 2 * n_streams : 3 * n_streams]
+        ).astype(np.complex64)
+        estimates[:, mirror] = (
+            solved[..., n_streams : 2 * n_streams]
+            + 1j * solved[..., 3 * n_streams :]
+        ).astype(np.complex64)
+
+    return estimates
+
+
 def target_user_streams(full_stream_estimates: np.ndarray) -> np.ndarray:
     n_frames, n_fft, n_users, _ = full_stream_estimates.shape
     out = np.zeros((n_frames, n_users, n_fft), dtype=np.complex64)
@@ -530,6 +731,24 @@ def detector_ber(
     eps: float,
 ) -> tuple[float | None, np.ndarray | None]:
     estimates = linear_detect(y_d, a_eff, noise_power, method=method, eps=eps)
+    if estimates is None:
+        return None, None
+    target = target_user_streams(estimates)
+    return ber_for_user_grid(target, bits, modulation), estimates
+
+
+def rf_iq_wl_detector_ber(
+    y_d: np.ndarray,
+    a_eff: np.ndarray,
+    noise_power: np.ndarray,
+    bits: np.ndarray,
+    modulation: str,
+    cfg: dict[str, Any],
+    *,
+    method: str,
+    eps: float,
+) -> tuple[float | None, np.ndarray | None]:
+    estimates = rf_iq_wl_detect(y_d, a_eff, noise_power, cfg, method=method, eps=eps)
     if estimates is None:
         return None, None
     target = target_user_streams(estimates)
@@ -1564,6 +1783,16 @@ def evaluate_one(
         method="mmse",
         eps=float(args.eps),
     )
+    true_wl_mmse_ber, _ = rf_iq_wl_detector_ber(
+        data["y_d"],
+        data["a_true"],
+        data["noise_power"],
+        bits,
+        modulation,
+        cfg,
+        method="mmse",
+        eps=float(args.eps),
+    )
     mrc_symbols = desired_only_mrc(data["y_d"], data["a_ls"], float(args.eps))
     mrc_ber = ber_for_user_grid(mrc_symbols, bits, modulation)
 
@@ -1573,8 +1802,9 @@ def evaluate_one(
         "LMMSE-ZF": lmmse_zf_ber,
         "LMMSE-MMSE": lmmse_mmse_ber,
         "ComNet-CE-ZF-Hard": comnet_zf_ber,
-        "True-H ZF": true_zf_ber,
-        "True-H MMSE": true_mmse_ber,
+        "Pre-RF True-H ZF": true_zf_ber,
+        "Pre-RF True-H MMSE": true_mmse_ber,
+        "RF-aware True-H WL-MMSE": true_wl_mmse_ber,
         "Desired-only MRC": mrc_ber,
     }
 
@@ -1638,8 +1868,9 @@ def evaluate_one(
         f"ComNet-CE-ZF-Hard={format_ber(ber['ComNet-CE-ZF-Hard'])}, "
         + (f"ComNet-FC={format_ber(ber['ComNet-FC'])}, " if "ComNet-FC" in ber else "")
         + (f"ComNet-BiLSTM={format_ber(ber['ComNet-BiLSTM'])}, " if "ComNet-BiLSTM" in ber else "")
-        + f"True-H ZF={format_ber(ber['True-H ZF'])}, "
-        f"True-H MMSE={format_ber(ber['True-H MMSE'])}, "
+        + f"Pre-RF True-H ZF={format_ber(ber['Pre-RF True-H ZF'])}, "
+        f"Pre-RF True-H MMSE={format_ber(ber['Pre-RF True-H MMSE'])}, "
+        f"RF-aware True-H WL-MMSE={format_ber(ber['RF-aware True-H WL-MMSE'])}, "
         f"Desired-MRC={format_ber(ber['Desired-only MRC'])}, "
         f"A_MSE_LS={to_db(a_mse['LS']):.2f}dB, "
         f"A_MSE_LMMSE={to_db(a_mse['LMMSE']):.2f}dB, "
@@ -1732,8 +1963,9 @@ def save_eval_plots(result_dir: Path, summary: dict[str, Any]) -> None:
             "ComNet-CE-ZF-Hard",
             "ComNet-FC",
             "ComNet-BiLSTM",
-            "True-H ZF",
-            "True-H MMSE",
+            "Pre-RF True-H ZF",
+            "Pre-RF True-H MMSE",
+            "RF-aware True-H WL-MMSE",
             "Desired-only MRC",
         ],
     )

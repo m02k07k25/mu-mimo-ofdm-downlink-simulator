@@ -11,6 +11,7 @@
 - `ofdm.py`: IFFT, clipping, CP insertion.
 - `modulation.py`: 16QAM/64QAM Gray QAM modulation.
 - `noise.py`: SNR 변환과 AWGN 추가.
+- `helper/impairments.py`: RX I/Q imbalance, common phase rotation 같은 RF impairment helper.
 
 ## MATLAB Mapping
 
@@ -54,4 +55,10 @@ ofdm_modulate_freq
 
 add_awgn
   complex Gaussian noise 추가
+
+apply_rf_impairments
+  RX front-end I/Q gain imbalance, I/Q phase error, common phase rotation 적용
+
+rf_impairment_widely_linear_coefficients
+  I/Q imbalance를 y = alpha*x + beta*conj(x) 형태의 oracle 계수로 변환
 ```
