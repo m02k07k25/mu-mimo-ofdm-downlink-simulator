@@ -1,162 +1,144 @@
-# TODO: Raw MU-MIMO E2E ComNet
+# TODO
 
-작성 기준: 2026-05-13
+Updated: 2026-05-17
 
-## 완료된 작업
+## Done
 
-- `tx_mumimo_e2e_dataset.py`로 raw UE antenna-domain MU-MIMO OFDM 데이터셋을 생성한다.
-- `rx_mumimo_receiver.py`로 raw MU-MIMO ComNet 수신기를 학습/평가한다.
-- SCM-style clustered multipath channel을 `mumimo_phy/scm.py`로 분리했다.
-- MATLAB reference의 기본 물리계층 함수를 Python 모듈로 정리했다.
-  - `copy/SCM.m` -> `ScmChannelGenerator`
-  - `copy/steer_precoding.m` -> `steering_precoder`
-  - `copy/ZF_precoding.m` -> `zf_precoder`
-  - `copy/awgn_noise.m` -> `add_awgn`
-- analog TX/RX steering beam과 per-subcarrier digital ZF precoder를 적용했다.
-- BiLSTM-SD 기본 hidden size를 `20 10 6`에서 `64 32 16`으로 키우고, BiLSTM 전용 LR step 기본값을 `100`, epoch 기본값을 `300`으로 조정했다.
-- CE 기본 모델을 기존 linear 보정에서 `base + residual MLP` 구조의 `resmlp`로 바꿨다. 기본값은 `--ce-hidden-dim 512 --ce-dropout 0.05`이다.
-- SDNet 입력에 `--sd-feature-set reliability`를 추가해 ZF/MMSE 추정값, full-stream residual, gain, cond(A), noise/SNR feature를 함께 사용한다.
-- TX train/val 기본 SNR을 단일 40 dB에서 `15 20 25 30 35 40` mixed-SNR로 변경했다.
-- test SNR sweep을 paired base frame 방식으로 변경했다. `test_snr*.npz` 파일들은 같은 bits/channel/precoder/clean waveform을 공유하고 SNR별 AWGN 크기만 다르게 저장한다.
-- `mumimo_phy/helper/`에 RF impairment helper를 추가했다. RX I/Q gain imbalance, I/Q phase error, common phase rotation은 기본 실험 조건으로 켠다.
-- RF impairment용 `RF-aware True-H WL-MMSE` oracle baseline을 추가했다. I/Q imbalance의 mirror-subcarrier leakage를 고려해 subcarrier pair 단위 widely-linear MMSE로 검출한다.
-- `csit_error_var` 기본값을 `0.005`로 변경했다.
-- clipping 조건에서 all-ones pilot이 channel estimation floor를 만들 수 있음을 확인하고, `--pilot-kind qpsk`를 기본 pilot 방향으로 정리했다.
-- `mumimo_phy/` 패키지를 추가해 OFDM, QAM, noise, SCM, beamforming을 모듈화했다.
-- 명령어는 PowerShell backtick 줄연결 없이 한 줄로 제공한다는 규칙을 `AGENTS.md`에 추가했다.
-- 루트 `README.md`를 추가해 환경, 모델 흐름, 주요 개념, TX/RX 명령어를 정리했다.
+- raw MU-MIMO E2E TX/RX 경로 구현
+- SCM-style clustered multipath channel 구현
+- QPSK pilot 적용
+- paired test SNR sweep 적용
+- RF impairment와 RF-aware True-H WL-MMSE oracle baseline 추가
+- BER, bit error count, channel MSE/NMSE, diagnostic CSV 저장 추가
+- CE target `auto|pre-rf|rf-linear` 추가
+- SD feature `rf-reliability` 추가
+- CE type `blend-resmlp` 추가
+- main dataset 생성
+- `--lmmse-mode global|snr-binned` 추가
+- SNR-binned LMMSE full 300 epoch run 완료
 
-## 현재 기준 설정
+## Current Best Result
 
 ```text
-modulation = 64QAM
-n_users = 2
-n_streams = 2
-n_tx = 8
-n_rx_per_ue = 4
-n_fft = 64
-n_cp = 16
-n_taps = 7
-n_rays_per_path = 15
-channel_model = SCM-style clustered multipath
-csit_error_var = 0.005
+Dataset:
+outputs_mumimo_e2e_64qam_csit001_clip20_rfsmall_train10000
+
+Result:
+results_mumimo_e2e_64qam_csit001_clip20_rfsmall_train10000_blend_ce_rf_reliability_snr_lmmse
+```
+
+설정:
+
+```text
+64QAM
+csit_error_var = 0.001
 case = clipping
+clip_ratio = 2.0
+rx_iq_gain_imbalance_db = 0.2
+rx_iq_phase_error_deg = 1.0
+rx_common_phase_error_deg = 1.0
+CE = blend-resmlp
+SD = BiLSTM
+SD feature = rf-reliability
+CE target = auto -> rf-linear
+LMMSE mode = snr-binned
+```
+
+40 dB:
+
+```text
+LS-MMSE                  2.654e-3
+LMMSE-MMSE               3.033e-3
+ComNet-CE-ZF-Hard        2.543e-3
+ComNet-BiLSTM            2.503e-3
+RF-aware True-H WL-MMSE  1.426e-3
+```
+
+현재 결론:
+
+- ComNet-BiLSTM은 25 dB 이상에서 LS-MMSE보다 좋다.
+- SNR-binned LMMSE는 global LMMSE보다 high-SNR LMMSE BER과 channel MSE를 개선했다.
+- 그래도 high SNR BER에서는 LMMSE-MMSE가 LS-MMSE를 완전히 이기지 못한다.
+- RF-aware oracle과는 gap이 남아 있으므로, 다음 단계는 direct bit prediction보다 correction-based SD가 맞다.
+
+## Next Priorities
+
+### 1. Correction-based SD
+
+현재 SD는 bit를 직접 예측한다.
+
+```text
+feature -> neural net -> predicted bit
+```
+
+다음 단계는 baseline correction 방식이다.
+
+```text
+baseline bit = LS-MMSE or RF-aware WL-MMSE hard decision
+feature -> neural net -> correction bit
+final bit = baseline bit XOR correction
+```
+
+추가할 지표:
+
+```text
+baseline wrong bits corrected
+baseline correct bits damaged
+false correction rate
+net BER gain
+```
+
+목표:
+
+- high SNR에서 baseline이 맞힌 bit를 망치지 않기
+- RF-aware oracle과의 gap 줄이기
+
+### 2. Feature Cache
+
+`rf-reliability`는 RF-aware WL-MMSE feature를 RX에서 계산하므로 시간이 든다. TX에서 만들기보다는 RX feature cache가 맞다.
+
+후보 옵션:
+
+```text
+--cache-sd-features
+```
+
+캐시 위치:
+
+```text
+results_*/feature_cache/
+```
+
+### 3. Main/Stress 분리
+
+main:
+
+```text
+csit_error_var = 0.001
+clip_ratio = 2.0
+small RF impairment
+```
+
+stress:
+
+```text
+csit_error_var = 0.005
 clip_ratio = 1.6
-pilot_kind = qpsk
-train_snr_db_list = 15 20 25 30 35 40
-test_snr_policy = paired base frames, SNR별 AWGN scale만 변경
-rx_iq_gain_imbalance_db = 0.5
-rx_iq_phase_error_deg = 3.0
-rx_common_phase_error_deg = 5.0
+larger RF impairment
 ```
 
-현재 권장 명령어:
+main 결과와 stress 결과를 섞어서 해석하지 말 것.
+
+## Commands
+
+Main RX:
 
 ```powershell
-python tx_mumimo_e2e_dataset.py --out-dir outputs_mumimo_e2e_64qam_scm_csit005_clip16_mixed15_40 --modulation 64QAM --n-train-frames 5000 --n-val-frames 1000 --n-test-frames-per-snr 1000
-python rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_scm_csit005_clip16_mixed15_40 --result-dir results_mumimo_e2e_64qam_scm_csit005_clip16_mixed15_40_bilstm --mode train-all --sd-type bilstm --sd-feature-set reliability --ce-type resmlp --bilstm-epochs 300 --device cuda
+C:\Users\m02k0\anaconda3\envs\incheon_traffic_gpu\python.exe rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_csit001_clip20_rfsmall_train10000 --result-dir results_mumimo_e2e_64qam_csit001_clip20_rfsmall_train10000_blend_ce_rf_reliability_snr_lmmse --mode train-all --sd-type bilstm --sd-feature-set rf-reliability --ce-type blend-resmlp --ce-target auto --lmmse-mode snr-binned --bilstm-epochs 300 --device cuda
 ```
 
-## 다음 작업
-
-### 1. 환경 정리
-
-- 사용자가 `torch_mk` conda 환경을 직접 생성한다.
-- Python 3.9 + PyTorch CUDA 환경에서 다음을 확인한다.
+Syntax check:
 
 ```powershell
-python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))"
-```
-
-- `torch.cuda.is_available() == True` 확인 후 smoke run을 수행한다.
-
-### 2. SCM 구현 검증
-
-- MATLAB `copy/SCM.m` 결과와 Python `ScmChannelGenerator`의 통계적 특성을 비교한다.
-- 확인할 항목:
-  - path power decay
-  - strongest path angle 선택
-  - steering vector 크기와 위상
-  - frequency response shape
-  - raw received waveform shape
-
-### 3. Clip Ratio Ablation
-
-다음 조합을 비교한다.
-
-```text
-case=linear
-case=clipping, clip_ratio=3.0, pilot_kind=qpsk
-case=clipping, clip_ratio=2.0, pilot_kind=qpsk
-case=clipping, clip_ratio=1.6, pilot_kind=qpsk
-case=clipping, clip_ratio=2.0, pilot_kind=ones
-```
-
-비교 지표:
-
-```text
-BER vs SNR
-channel MSE vs SNR
-effective SINR
-error count / total bit count
-```
-
-### 4. CSIT Error Ablation
-
-`csit_error_var`별 성능을 비교한다.
-
-```text
-0.0
-0.001
-0.005
-0.01
-0.02
-```
-
-목적:
-
-- 송신 precoder mismatch가 BER floor에 미치는 영향 확인
-- residual multi-user interference 증가 확인
-- `True-H` baseline과 LS/LMMSE/ComNet 차이 확인
-
-### 5. Mixed-SNR 학습 검증
-
-현재 train/val split은 기본적으로 `snr_train_db_list = 15 20 25 30 35 40`에서 frame마다 SNR을 랜덤 선택한다.
-
-확인할 내용:
-
-- BiLSTM이 40 dB에 과하게 맞춰지는 문제 완화
-- 15~35 dB 구간 일반화 개선
-- 단일 40 dB train과 mixed-SNR train BER 비교
-
-### 6. RX 결과 기록 개선
-
-- `eval_summary.json`에 error count와 total bit count를 저장한다.
-- BER이 0일 때도 실제 관측 error 수를 구분한다.
-- 결과 plot에 설정값을 함께 기록한다.
-
-### 7. 문서 보강
-
-- `README_mumimo_e2e_receiver.md`의 깨진 한글을 UTF-8로 정리한다.
-- effective-SISO bridge와 raw MU-MIMO E2E 경로 차이를 그림 또는 표로 정리한다.
-- `mumimo_phy/README.md`에 MATLAB reference와 Python 구현 차이를 더 명확히 적는다.
-
-## 최소 검증 명령어
-
-문법 검사:
-
-```powershell
-python -m py_compile tx_mumimo_e2e_dataset.py rx_mumimo_receiver.py mumimo_phy\__init__.py mumimo_phy\beamforming.py mumimo_phy\modulation.py mumimo_phy\noise.py mumimo_phy\ofdm.py mumimo_phy\scm.py
-```
-
-TX smoke:
-
-```powershell
-python tx_mumimo_e2e_dataset.py --out-dir outputs_mumimo_e2e_16qam_smoke --modulation 16QAM --case clipping --clip-ratio 2.0 --pilot-kind qpsk --n-train-frames 20 --n-val-frames 8 --n-test-frames-per-snr 8 --snr-test-db 20 40
-```
-
-RX smoke:
-
-```powershell
-python rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_16qam_smoke --result-dir results_mumimo_e2e_16qam_smoke --mode train-all --sd-type both --ce-epochs 1 --sd-epochs 1 --bilstm-epochs 1 --device cuda
+python -m py_compile rx_mumimo_receiver.py
 ```
