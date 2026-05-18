@@ -4,3 +4,4 @@ __pycache__
 *.zip
 outputs*
 results*
+.DS_Store
