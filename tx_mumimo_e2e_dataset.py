@@ -309,13 +309,8 @@ def _empty_split(cfg: MuMimoE2EConfig, n_frames: int) -> dict[str, np.ndarray]:
 
 
 def _condition_numbers(A_eff_true: np.ndarray) -> np.ndarray:
-    n_fft, n_users = A_eff_true.shape[0], A_eff_true.shape[1]
-    cond = np.zeros((n_fft, n_users), dtype=np.float32)
-    for subcarrier in range(n_fft):
-        for user_id in range(n_users):
-            value = np.linalg.cond(A_eff_true[subcarrier, user_id])
-            cond[subcarrier, user_id] = np.float32(value if np.isfinite(value) else np.finfo(np.float32).max)
-    return cond
+    cond = np.linalg.cond(A_eff_true).astype(np.float32)
+    return np.where(np.isfinite(cond), cond, np.finfo(np.float32).max).astype(np.float32)
 
 
 def _effective_sinr_db(
@@ -323,14 +318,8 @@ def _effective_sinr_db(
     inter_stream_power: np.ndarray,
     noise_power: float,
 ) -> np.ndarray:
-    effective_sinr_db = np.zeros(desired_power.shape[0], dtype=np.float32)
-    for user_id in range(desired_power.shape[0]):
-        sinr = float(desired_power[user_id]) / max(
-            float(inter_stream_power[user_id]) + float(noise_power),
-            1e-300,
-        )
-        effective_sinr_db[user_id] = float(linear_to_db(sinr))
-    return effective_sinr_db
+    denominator = np.maximum(inter_stream_power + float(noise_power), 1e-300)
+    return linear_to_db(desired_power / denominator).astype(np.float32)
 
 
 def _make_clean_frame(
@@ -511,9 +500,7 @@ def _make_split_dataset(
         y_p_clean = clean["y_p_clean"]
         if not isinstance(y_p_clean, np.ndarray):
             raise TypeError("y_p_clean must be an ndarray")
-        y_p_time = np.zeros_like(y_p_clean)
-        for pilot_slot in range(cfg.n_streams):
-            y_p_time[pilot_slot] = add_awgn(y_p_clean[pilot_slot], noise_power, rng)
+        y_p_time = add_awgn(y_p_clean, noise_power, rng)
 
         _write_noisy_frame(
             data=data,

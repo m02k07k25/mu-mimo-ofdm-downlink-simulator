@@ -131,14 +131,12 @@ def apply_multipath_mimo(tx_time: np.ndarray, h_time: np.ndarray) -> np.ndarray:
     if h_tx != n_tx:
         raise ValueError(f"Channel n_tx={h_tx} does not match waveform n_tx={n_tx}")
     y_time = np.zeros((n_users, n_rx, time_len), dtype=np.complex64)
-    for user_id in range(n_users):
-        for tap_index in range(n_taps):
-            usable = time_len - tap_index
-            if usable <= 0:
-                continue
-            for rx_id in range(n_rx):
-                for tx_id in range(n_tx):
-                    y_time[user_id, rx_id, tap_index:] += (
-                        h_time[user_id, tap_index, rx_id, tx_id] * tx_time[tx_id, :usable]
-                    )
+    for tap_index in range(min(n_taps, time_len)):
+        usable = time_len - tap_index
+        y_time[:, :, tap_index:] += np.einsum(
+            "urt,tl->url",
+            h_time[:, tap_index, :, :],
+            tx_time[:, :usable],
+            optimize=True,
+        )
     return y_time

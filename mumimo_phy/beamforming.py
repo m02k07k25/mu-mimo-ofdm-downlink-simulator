@@ -154,18 +154,23 @@ def hybrid_zf_precoder_context(
     if rx_beams.shape != (n_users, n_rx):
         raise ValueError(f"rx_beams must have shape {(n_users, n_rx)}, got {rx_beams.shape}")
 
-    g_tx_est = np.zeros((n_fft, n_users, n_tx), dtype=np.complex64)
-    w_digital = np.zeros((n_fft, n_users, n_users), dtype=np.complex64)
-    w_precoder = np.zeros((n_fft, n_tx, n_users), dtype=np.complex64)
+    # MATLAB uses non-conjugating transpose (Wr(:,d).') in the reference script.
+    g_tx_est = np.einsum("ur,kurt->kut", rx_beams, h_tx_est, optimize=True).astype(np.complex64)
+    h_eff_est = np.einsum("kut,ts->kus", g_tx_est, tx_beams, optimize=True)
+    w_digital = np.linalg.pinv(h_eff_est).astype(np.complex64)
+    w_precoder = np.einsum("tu,kus->kts", tx_beams, w_digital, optimize=True).astype(
+        np.complex64
+    )
 
-    for subcarrier in range(n_fft):
-        for user_id in range(n_users):
-            # MATLAB uses non-conjugating transpose (Wr(:,d).') in the reference script.
-            g_tx_est[subcarrier, user_id] = rx_beams[user_id].T @ h_tx_est[subcarrier, user_id]
-        h_eff_est = g_tx_est[subcarrier] @ tx_beams
-        w_dig, _ = zf_precoder(h_eff_est, normalization="none")
-        w_total = tx_beams @ w_dig
-        w_digital[subcarrier] = w_dig
-        w_precoder[subcarrier] = normalize_precoder(w_total, normalization)
-
-    return g_tx_est, w_digital, w_precoder
+    normalization = str(normalization).lower()
+    if normalization == "none":
+        return g_tx_est, w_digital, w_precoder
+    if normalization == "column":
+        norms = np.linalg.norm(w_precoder, axis=1, keepdims=True)
+        safe_norms = np.where(norms > 1e-12, norms, 1.0).astype(np.float32)
+        return g_tx_est, w_digital, (w_precoder / safe_norms).astype(np.complex64)
+    if normalization == "fro":
+        norms = np.linalg.norm(w_precoder, axis=(1, 2), keepdims=True)
+        safe_norms = np.where(norms > 1e-12, norms, 1.0).astype(np.float32)
+        return g_tx_est, w_digital, (w_precoder / safe_norms).astype(np.complex64)
+    raise ValueError("precoder normalization must be one of none, column, fro")
