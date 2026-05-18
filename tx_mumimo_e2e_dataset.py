@@ -153,7 +153,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--csit-error-var",
         type=float,
-        default=0.005,
+        default=0.001,
         help="Complex CSIT error variance E[|E|^2] for H_tx_est = H_true + E.",
     )
     parser.add_argument("--precoder-norm", type=str, default="column", choices=["none", "column", "fro"])

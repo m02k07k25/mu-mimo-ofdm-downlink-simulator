@@ -1,0 +1,663 @@
+{
+  "config": {
+    "n_fft": 64,
+    "n_cp": 16,
+    "modulation": "64QAM",
+    "n_users": 2,
+    "n_tx": 8,
+    "n_rx_per_ue": 4,
+    "n_taps": 7,
+    "n_rays_per_path": 15,
+    "pdp_decay": 5.0,
+    "carrier_freq_hz": 800000000.0,
+    "antenna_spacing_lambda": 0.5,
+    "scm_angle_spread_deg": 3.0,
+    "snr_train_db": 40.0,
+    "snr_train_db_list": [
+      15,
+      20,
+      25,
+      30,
+      35,
+      40
+    ],
+    "snr_test_db": [
+      0,
+      5,
+      10,
+      15,
+      20,
+      25,
+      30,
+      35,
+      40
+    ],
+    "n_train_frames": 50000,
+    "n_val_frames": 10000,
+    "n_test_frames_per_snr": 10000,
+    "csit_error_var": 0.001,
+    "precoder_norm": "column",
+    "case": "clipping",
+    "clip_ratio": 2.0,
+    "pilot_kind": "qpsk",
+    "rx_iq_gain_imbalance_db": 0.2,
+    "rx_iq_phase_error_deg": 1.0,
+    "rx_common_phase_error_deg": 1.0,
+    "seed": 7,
+    "n_streams": 2,
+    "waveform_type": "raw_mumimo_e2e",
+    "channel_model": "SCM-style geometric clustered channel",
+    "pilot_design": "orthogonal_stream_slots_qpsk",
+    "power_policy": "hybrid steering + digital ZF, total precoder norm=column",
+    "nonlinear_processing": "BS per-antenna time-domain OFDM symbol is clipped before cyclic prefix insertion",
+    "symbol_power": "E[|s_u|^2] = 1 for QAM data and active pilots",
+    "precoder": "MATLAB-style analog steering beams from the strongest SCM path, followed by per-subcarrier digital ZF on Wr.T @ H_tx_est @ Wt",
+    "extra_arrays": [
+      "W_tx_analog",
+      "W_rx_analog",
+      "W_digital",
+      "scm_selected_angles",
+      "scm_center_angles"
+    ],
+    "noise_power": "complex per-antenna variance sigma2; generated as sqrt(sigma2/2)*(n_re+j*n_im)",
+    "snr_definition": "sigma2 = mean(|raw received data waveform before AWGN|^2) / 10^(snr_db/10)",
+    "rf_impairments": {
+      "location": "receiver front-end, after multipath channel and before AWGN",
+      "enabled": true,
+      "rx_iq_gain_imbalance_db": 0.2,
+      "rx_iq_phase_error_deg": 1.0,
+      "rx_common_phase_error_deg": 1.0,
+      "widely_linear_model": "y_rf = alpha * y_channel + beta * conj(y_channel)",
+      "alpha": {
+        "real": 0.9996881403154022,
+        "imag": 0.026077250623288077
+      },
+      "beta": {
+        "real": 0.01143614557619047,
+        "imag": 0.008827247889674596
+      },
+      "default_policy": "enabled by default for RF stress testing; use the True-H WL-MMSE receiver baseline as the RF-aware oracle",
+      "mild_stress_test_example": "0.5 dB I/Q gain imbalance, 3 degree I/Q phase error, 5 degree common phase rotation",
+      "nonzero_warning": "I/Q imbalance is a widely-linear RF impairment. With nonzero RF impairment, A_eff_true remains the pre-RF linear effective channel, so plain True-H and LMMSE channel-estimation baselines are no longer strict oracle references."
+    },
+    "test_snr_policy": "paired base frames: test_snr*.npz files share the same channel, bits, precoder, clean data waveform, and clean pilot waveform per frame; only AWGN scale changes by SNR",
+    "receiver_compatibility": "raw UE antenna-domain waveform; use rx_mumimo_receiver.py"
+  },
+  "receiver": {
+    "ce_target": "auto",
+    "ce_target_resolved": "rf-linear",
+    "lmmse_mode": "snr-binned",
+    "lmmse_snr_bins_db": [
+      15.0,
+      20.0,
+      25.0,
+      30.0,
+      35.0,
+      40.0
+    ],
+    "channel_mse_reference": "a_ce_target"
+  },
+  "a_mse_db": {
+    "0": {
+      "LS": 5.152682544664058,
+      "LMMSE": -1.284073617823491,
+      "ComNet-CE": -1.2821271279223432
+    },
+    "5": {
+      "LS": 0.1566958246319145,
+      "LMMSE": -6.181863125633756,
+      "ComNet-CE": -6.1757365324710065
+    },
+    "10": {
+      "LS": -4.830611151247786,
+      "LMMSE": -10.873145079228754,
+      "ComNet-CE": -10.859071618823261
+    },
+    "15": {
+      "LS": -9.790662595198029,
+      "LMMSE": -15.019599393629854,
+      "ComNet-CE": -15.02957441047474
+    },
+    "20": {
+      "LS": -14.66659030682305,
+      "LMMSE": -18.668413632466528,
+      "ComNet-CE": -18.663523094326152
+    },
+    "25": {
+      "LS": -19.295904375335397,
+      "LMMSE": -22.162254166880594,
+      "ComNet-CE": -21.998067632861545
+    },
+    "30": {
+      "LS": -23.296402743396726,
+      "LMMSE": -25.531219158249762,
+      "ComNet-CE": -25.05960408275081
+    },
+    "35": {
+      "LS": -26.12104849381812,
+      "LMMSE": -28.70900101496565,
+      "ComNet-CE": -27.82542410658657
+    },
+    "40": {
+      "LS": -27.60680167304551,
+      "LMMSE": -31.241497257231213,
+      "ComNet-CE": -29.65198015375136
+    }
+  },
+  "a_nmse_db": {
+    "0": {
+      "LS": 2.846097713642232,
+      "LMMSE": -3.590658535023377,
+      "ComNet-CE": -3.588712060666119
+    },
+    "5": {
+      "LS": -2.1498889873973868,
+      "LMMSE": -8.488447915518273,
+      "ComNet-CE": -8.482321249023107
+    },
+    "10": {
+      "LS": -7.137196128034896,
+      "LMMSE": -13.179729764904122,
+      "ComNet-CE": -13.165656515730653
+    },
+    "15": {
+      "LS": -12.09724739085993,
+      "LMMSE": -17.326184300299296,
+      "ComNet-CE": -17.33615899175208
+    },
+    "20": {
+      "LS": -16.973175330153435,
+      "LMMSE": -20.974998574841315,
+      "ComNet-CE": -20.97010782678793
+    },
+    "25": {
+      "LS": -21.602489136441704,
+      "LMMSE": -24.46883895709835,
+      "ComNet-CE": -24.304652548374396
+    },
+    "30": {
+      "LS": -25.60298736740772,
+      "LMMSE": -27.837804069276366,
+      "ComNet-CE": -27.366189076991283
+    },
+    "35": {
+      "LS": -28.427633247304264,
+      "LMMSE": -31.015585924672884,
+      "ComNet-CE": -30.13200896967906
+    },
+    "40": {
+      "LS": -29.913386567988244,
+      "LMMSE": -33.54808215296611,
+      "ComNet-CE": -31.958564783035413
+    }
+  },
+  "ber": {
+    "0": {
+      "LS-ZF": 0.38488958333333334,
+      "LS-MMSE": 0.3793046875,
+      "LMMSE-ZF": 0.3265059895833333,
+      "LMMSE-MMSE": 0.3100453125,
+      "ComNet-CE-ZF-Hard": 0.32649947916666666,
+      "Pre-RF True-H ZF": 0.28360963541666667,
+      "Pre-RF True-H MMSE": 0.2728109375,
+      "RF-aware True-H WL-MMSE": 0.27253203125,
+      "Desired-only MRC": 0.37417395833333333,
+      "ComNet-BiLSTM": 0.317915234375
+    },
+    "5": {
+      "LS-ZF": 0.281066796875,
+      "LS-MMSE": 0.2724684895833333,
+      "LMMSE-ZF": 0.21900989583333333,
+      "LMMSE-MMSE": 0.20409361979166665,
+      "ComNet-CE-ZF-Hard": 0.21906419270833333,
+      "Pre-RF True-H ZF": 0.18185963541666667,
+      "Pre-RF True-H MMSE": 0.17369908854166666,
+      "RF-aware True-H WL-MMSE": 0.17303385416666667,
+      "Desired-only MRC": 0.266055078125,
+      "ComNet-BiLSTM": 0.207326953125
+    },
+    "10": {
+      "LS-ZF": 0.17200768229166666,
+      "LS-MMSE": 0.16457604166666667,
+      "LMMSE-ZF": 0.12126263020833333,
+      "LMMSE-MMSE": 0.11283411458333334,
+      "ComNet-CE-ZF-Hard": 0.121352734375,
+      "Pre-RF True-H ZF": 0.09351380208333333,
+      "Pre-RF True-H MMSE": 0.08927526041666667,
+      "RF-aware True-H WL-MMSE": 0.08783619791666666,
+      "Desired-only MRC": 0.16662122395833334,
+      "ComNet-BiLSTM": 0.11223190104166667
+    },
+    "15": {
+      "LS-ZF": 0.08508502604166666,
+      "LS-MMSE": 0.08112330729166667,
+      "LMMSE-ZF": 0.05062408854166667,
+      "LMMSE-MMSE": 0.047502213541666664,
+      "ComNet-CE-ZF-Hard": 0.05074765625,
+      "Pre-RF True-H ZF": 0.03393763020833333,
+      "Pre-RF True-H MMSE": 0.032338932291666664,
+      "RF-aware True-H WL-MMSE": 0.030615625,
+      "Desired-only MRC": 0.103041796875,
+      "ComNet-BiLSTM": 0.04658880208333333
+    },
+    "20": {
+      "LS-ZF": 0.0309828125,
+      "LS-MMSE": 0.02974921875,
+      "LMMSE-ZF": 0.017478255208333335,
+      "LMMSE-MMSE": 0.016815885416666666,
+      "ComNet-CE-ZF-Hard": 0.017669401041666668,
+      "Pre-RF True-H ZF": 0.010037109375,
+      "Pre-RF True-H MMSE": 0.009582552083333333,
+      "RF-aware True-H WL-MMSE": 0.00871640625,
+      "Desired-only MRC": 0.07405247395833334,
+      "ComNet-BiLSTM": 0.016430598958333334
+    },
+    "25": {
+      "LS-ZF": 0.009951041666666667,
+      "LS-MMSE": 0.009716015625,
+      "LMMSE-ZF": 0.007103125,
+      "LMMSE-MMSE": 0.006970052083333333,
+      "ComNet-CE-ZF-Hard": 0.007067838541666666,
+      "Pre-RF True-H ZF": 0.003964713541666666,
+      "Pre-RF True-H MMSE": 0.0038190104166666667,
+      "RF-aware True-H WL-MMSE": 0.0034135416666666667,
+      "Desired-only MRC": 0.065378515625,
+      "ComNet-BiLSTM": 0.006721875
+    },
+    "30": {
+      "LS-ZF": 0.004535807291666667,
+      "LS-MMSE": 0.004474348958333333,
+      "LMMSE-ZF": 0.004103125,
+      "LMMSE-MMSE": 0.004066796875,
+      "ComNet-CE-ZF-Hard": 0.003935026041666667,
+      "Pre-RF True-H ZF": 0.00243359375,
+      "Pre-RF True-H MMSE": 0.0023782552083333333,
+      "RF-aware True-H WL-MMSE": 0.0021203125,
+      "Desired-only MRC": 0.06310768229166666,
+      "ComNet-BiLSTM": 0.0037727864583333333
+    },
+    "35": {
+      "LS-ZF": 0.003152604166666667,
+      "LS-MMSE": 0.0031384114583333333,
+      "LMMSE-ZF": 0.0029970052083333333,
+      "LMMSE-MMSE": 0.0029854166666666666,
+      "ComNet-CE-ZF-Hard": 0.0029611979166666667,
+      "Pre-RF True-H ZF": 0.0019861979166666665,
+      "Pre-RF True-H MMSE": 0.001964453125,
+      "RF-aware True-H WL-MMSE": 0.0017290364583333333,
+      "Desired-only MRC": 0.06245234375,
+      "ComNet-BiLSTM": 0.0028459635416666668
+    },
+    "40": {
+      "LS-ZF": 0.0027772135416666665,
+      "LS-MMSE": 0.002773046875,
+      "LMMSE-ZF": 0.0025751302083333334,
+      "LMMSE-MMSE": 0.002569401041666667,
+      "ComNet-CE-ZF-Hard": 0.0026662760416666666,
+      "Pre-RF True-H ZF": 0.001860546875,
+      "Pre-RF True-H MMSE": 0.0018520833333333334,
+      "RF-aware True-H WL-MMSE": 0.001608203125,
+      "Desired-only MRC": 0.062262890625,
+      "ComNet-BiLSTM": 0.00257421875
+    }
+  },
+  "bit_errors": {
+    "0": {
+      "LS-ZF": 2955952,
+      "LS-MMSE": 2913060,
+      "LMMSE-ZF": 2507566,
+      "LMMSE-MMSE": 2381148,
+      "ComNet-CE-ZF-Hard": 2507516,
+      "Pre-RF True-H ZF": 2178122,
+      "Pre-RF True-H MMSE": 2095188,
+      "RF-aware True-H WL-MMSE": 2093046,
+      "Desired-only MRC": 2873656,
+      "ComNet-BiLSTM": 2441589
+    },
+    "5": {
+      "LS-ZF": 2158593,
+      "LS-MMSE": 2092558,
+      "LMMSE-ZF": 1681996,
+      "LMMSE-MMSE": 1567439,
+      "ComNet-CE-ZF-Hard": 1682413,
+      "Pre-RF True-H ZF": 1396682,
+      "Pre-RF True-H MMSE": 1334009,
+      "RF-aware True-H WL-MMSE": 1328900,
+      "Desired-only MRC": 2043303,
+      "ComNet-BiLSTM": 1592271
+    },
+    "10": {
+      "LS-ZF": 1321019,
+      "LS-MMSE": 1263944,
+      "LMMSE-ZF": 931297,
+      "LMMSE-MMSE": 866566,
+      "ComNet-CE-ZF-Hard": 931989,
+      "Pre-RF True-H ZF": 718186,
+      "Pre-RF True-H MMSE": 685634,
+      "RF-aware True-H WL-MMSE": 674582,
+      "Desired-only MRC": 1279651,
+      "ComNet-BiLSTM": 861941
+    },
+    "15": {
+      "LS-ZF": 653453,
+      "LS-MMSE": 623027,
+      "LMMSE-ZF": 388793,
+      "LMMSE-MMSE": 364817,
+      "ComNet-CE-ZF-Hard": 389742,
+      "Pre-RF True-H ZF": 260641,
+      "Pre-RF True-H MMSE": 248363,
+      "RF-aware True-H WL-MMSE": 235128,
+      "Desired-only MRC": 791361,
+      "ComNet-BiLSTM": 357802
+    },
+    "20": {
+      "LS-ZF": 237948,
+      "LS-MMSE": 228474,
+      "LMMSE-ZF": 134233,
+      "LMMSE-MMSE": 129146,
+      "ComNet-CE-ZF-Hard": 135701,
+      "Pre-RF True-H ZF": 77085,
+      "Pre-RF True-H MMSE": 73594,
+      "RF-aware True-H WL-MMSE": 66942,
+      "Desired-only MRC": 568723,
+      "ComNet-BiLSTM": 126187
+    },
+    "25": {
+      "LS-ZF": 76424,
+      "LS-MMSE": 74619,
+      "LMMSE-ZF": 54552,
+      "LMMSE-MMSE": 53530,
+      "ComNet-CE-ZF-Hard": 54281,
+      "Pre-RF True-H ZF": 30449,
+      "Pre-RF True-H MMSE": 29330,
+      "RF-aware True-H WL-MMSE": 26216,
+      "Desired-only MRC": 502107,
+      "ComNet-BiLSTM": 51624
+    },
+    "30": {
+      "LS-ZF": 34835,
+      "LS-MMSE": 34363,
+      "LMMSE-ZF": 31512,
+      "LMMSE-MMSE": 31233,
+      "ComNet-CE-ZF-Hard": 30221,
+      "Pre-RF True-H ZF": 18690,
+      "Pre-RF True-H MMSE": 18265,
+      "RF-aware True-H WL-MMSE": 16284,
+      "Desired-only MRC": 484667,
+      "ComNet-BiLSTM": 28975
+    },
+    "35": {
+      "LS-ZF": 24212,
+      "LS-MMSE": 24103,
+      "LMMSE-ZF": 23017,
+      "LMMSE-MMSE": 22928,
+      "ComNet-CE-ZF-Hard": 22742,
+      "Pre-RF True-H ZF": 15254,
+      "Pre-RF True-H MMSE": 15087,
+      "RF-aware True-H WL-MMSE": 13279,
+      "Desired-only MRC": 479634,
+      "ComNet-BiLSTM": 21857
+    },
+    "40": {
+      "LS-ZF": 21329,
+      "LS-MMSE": 21297,
+      "LMMSE-ZF": 19777,
+      "LMMSE-MMSE": 19733,
+      "ComNet-CE-ZF-Hard": 20477,
+      "Pre-RF True-H ZF": 14289,
+      "Pre-RF True-H MMSE": 14224,
+      "RF-aware True-H WL-MMSE": 12351,
+      "Desired-only MRC": 478179,
+      "ComNet-BiLSTM": 19770
+    }
+  },
+  "total_bits": {
+    "0": {
+      "LS-ZF": 7680000,
+      "LS-MMSE": 7680000,
+      "LMMSE-ZF": 7680000,
+      "LMMSE-MMSE": 7680000,
+      "ComNet-CE-ZF-Hard": 7680000,
+      "Pre-RF True-H ZF": 7680000,
+      "Pre-RF True-H MMSE": 7680000,
+      "RF-aware True-H WL-MMSE": 7680000,
+      "Desired-only MRC": 7680000,
+      "ComNet-BiLSTM": 7680000
+    },
+    "5": {
+      "LS-ZF": 7680000,
+      "LS-MMSE": 7680000,
+      "LMMSE-ZF": 7680000,
+      "LMMSE-MMSE": 7680000,
+      "ComNet-CE-ZF-Hard": 7680000,
+      "Pre-RF True-H ZF": 7680000,
+      "Pre-RF True-H MMSE": 7680000,
+      "RF-aware True-H WL-MMSE": 7680000,
+      "Desired-only MRC": 7680000,
+      "ComNet-BiLSTM": 7680000
+    },
+    "10": {
+      "LS-ZF": 7680000,
+      "LS-MMSE": 7680000,
+      "LMMSE-ZF": 7680000,
+      "LMMSE-MMSE": 7680000,
+      "ComNet-CE-ZF-Hard": 7680000,
+      "Pre-RF True-H ZF": 7680000,
+      "Pre-RF True-H MMSE": 7680000,
+      "RF-aware True-H WL-MMSE": 7680000,
+      "Desired-only MRC": 7680000,
+      "ComNet-BiLSTM": 7680000
+    },
+    "15": {
+      "LS-ZF": 7680000,
+      "LS-MMSE": 7680000,
+      "LMMSE-ZF": 7680000,
+      "LMMSE-MMSE": 7680000,
+      "ComNet-CE-ZF-Hard": 7680000,
+      "Pre-RF True-H ZF": 7680000,
+      "Pre-RF True-H MMSE": 7680000,
+      "RF-aware True-H WL-MMSE": 7680000,
+      "Desired-only MRC": 7680000,
+      "ComNet-BiLSTM": 7680000
+    },
+    "20": {
+      "LS-ZF": 7680000,
+      "LS-MMSE": 7680000,
+      "LMMSE-ZF": 7680000,
+      "LMMSE-MMSE": 7680000,
+      "ComNet-CE-ZF-Hard": 7680000,
+      "Pre-RF True-H ZF": 7680000,
+      "Pre-RF True-H MMSE": 7680000,
+      "RF-aware True-H WL-MMSE": 7680000,
+      "Desired-only MRC": 7680000,
+      "ComNet-BiLSTM": 7680000
+    },
+    "25": {
+      "LS-ZF": 7680000,
+      "LS-MMSE": 7680000,
+      "LMMSE-ZF": 7680000,
+      "LMMSE-MMSE": 7680000,
+      "ComNet-CE-ZF-Hard": 7680000,
+      "Pre-RF True-H ZF": 7680000,
+      "Pre-RF True-H MMSE": 7680000,
+      "RF-aware True-H WL-MMSE": 7680000,
+      "Desired-only MRC": 7680000,
+      "ComNet-BiLSTM": 7680000
+    },
+    "30": {
+      "LS-ZF": 7680000,
+      "LS-MMSE": 7680000,
+      "LMMSE-ZF": 7680000,
+      "LMMSE-MMSE": 7680000,
+      "ComNet-CE-ZF-Hard": 7680000,
+      "Pre-RF True-H ZF": 7680000,
+      "Pre-RF True-H MMSE": 7680000,
+      "RF-aware True-H WL-MMSE": 7680000,
+      "Desired-only MRC": 7680000,
+      "ComNet-BiLSTM": 7680000
+    },
+    "35": {
+      "LS-ZF": 7680000,
+      "LS-MMSE": 7680000,
+      "LMMSE-ZF": 7680000,
+      "LMMSE-MMSE": 7680000,
+      "ComNet-CE-ZF-Hard": 7680000,
+      "Pre-RF True-H ZF": 7680000,
+      "Pre-RF True-H MMSE": 7680000,
+      "RF-aware True-H WL-MMSE": 7680000,
+      "Desired-only MRC": 7680000,
+      "ComNet-BiLSTM": 7680000
+    },
+    "40": {
+      "LS-ZF": 7680000,
+      "LS-MMSE": 7680000,
+      "LMMSE-ZF": 7680000,
+      "LMMSE-MMSE": 7680000,
+      "ComNet-CE-ZF-Hard": 7680000,
+      "Pre-RF True-H ZF": 7680000,
+      "Pre-RF True-H MMSE": 7680000,
+      "RF-aware True-H WL-MMSE": 7680000,
+      "Desired-only MRC": 7680000,
+      "ComNet-BiLSTM": 7680000
+    }
+  },
+  "diagnostic": {
+    "0": {
+      "desired_power_mean": 2.897698163986206,
+      "inter_stream_power_mean": 0.5040308833122253,
+      "interference_to_desired_ratio": 0.17394181684501517,
+      "interference_to_desired_ratio_db": -7.59595997975032,
+      "effective_sinr_db_mean": -1.5645878314971924,
+      "effective_sinr_db_p10": -4.292630672454834,
+      "cond_A_mean": 4.797388076782227,
+      "cond_A_p95": 12.65145492553711,
+      "noise_power_mean": 3.273206949234009
+    },
+    "5": {
+      "desired_power_mean": 2.897698163986206,
+      "inter_stream_power_mean": 0.5040308833122253,
+      "interference_to_desired_ratio": 0.17394181684501517,
+      "interference_to_desired_ratio_db": -7.59595997975032,
+      "effective_sinr_db_mean": 2.45749568939209,
+      "effective_sinr_db_p10": -0.8419382572174072,
+      "cond_A_mean": 4.797388076782227,
+      "cond_A_p95": 12.65145492553711,
+      "noise_power_mean": 1.0350788831710815
+    },
+    "10": {
+      "desired_power_mean": 2.897698163986206,
+      "inter_stream_power_mean": 0.5040308833122253,
+      "interference_to_desired_ratio": 0.17394181684501517,
+      "interference_to_desired_ratio_db": -7.59595997975032,
+      "effective_sinr_db_mean": 5.557437419891357,
+      "effective_sinr_db_p10": 1.1306285858154297,
+      "cond_A_mean": 4.797388076782227,
+      "cond_A_p95": 12.65145492553711,
+      "noise_power_mean": 0.3273206949234009
+    },
+    "15": {
+      "desired_power_mean": 2.897698163986206,
+      "inter_stream_power_mean": 0.5040308833122253,
+      "interference_to_desired_ratio": 0.17394181684501517,
+      "interference_to_desired_ratio_db": -7.59595997975032,
+      "effective_sinr_db_mean": 7.593509197235107,
+      "effective_sinr_db_p10": 1.9437295198440552,
+      "cond_A_mean": 4.797388076782227,
+      "cond_A_p95": 12.65145492553711,
+      "noise_power_mean": 0.1035078838467598
+    },
+    "20": {
+      "desired_power_mean": 2.897698163986206,
+      "inter_stream_power_mean": 0.5040308833122253,
+      "interference_to_desired_ratio": 0.17394181684501517,
+      "interference_to_desired_ratio_db": -7.59595997975032,
+      "effective_sinr_db_mean": 8.716590881347656,
+      "effective_sinr_db_p10": 2.2214698791503906,
+      "cond_A_mean": 4.797388076782227,
+      "cond_A_p95": 12.65145492553711,
+      "noise_power_mean": 0.03273206949234009
+    },
+    "25": {
+      "desired_power_mean": 2.897698163986206,
+      "inter_stream_power_mean": 0.5040308833122253,
+      "interference_to_desired_ratio": 0.17394181684501517,
+      "interference_to_desired_ratio_db": -7.59595997975032,
+      "effective_sinr_db_mean": 9.23462963104248,
+      "effective_sinr_db_p10": 2.3010647296905518,
+      "cond_A_mean": 4.797388076782227,
+      "cond_A_p95": 12.65145492553711,
+      "noise_power_mean": 0.010350788943469524
+    },
+    "30": {
+      "desired_power_mean": 2.897698163986206,
+      "inter_stream_power_mean": 0.5040308833122253,
+      "interference_to_desired_ratio": 0.17394181684501517,
+      "interference_to_desired_ratio_db": -7.59595997975032,
+      "effective_sinr_db_mean": 9.438140869140625,
+      "effective_sinr_db_p10": 2.32417893409729,
+      "cond_A_mean": 4.797388076782227,
+      "cond_A_p95": 12.65145492553711,
+      "noise_power_mean": 0.0032732069958001375
+    },
+    "35": {
+      "desired_power_mean": 2.897698163986206,
+      "inter_stream_power_mean": 0.5040308833122253,
+      "interference_to_desired_ratio": 0.17394181684501517,
+      "interference_to_desired_ratio_db": -7.59595997975032,
+      "effective_sinr_db_mean": 9.509449005126953,
+      "effective_sinr_db_p10": 2.331397294998169,
+      "cond_A_mean": 4.797388076782227,
+      "cond_A_p95": 12.65145492553711,
+      "noise_power_mean": 0.0010350788943469524
+    },
+    "40": {
+      "desired_power_mean": 2.897698163986206,
+      "inter_stream_power_mean": 0.5040308833122253,
+      "interference_to_desired_ratio": 0.17394181684501517,
+      "interference_to_desired_ratio_db": -7.59595997975032,
+      "effective_sinr_db_mean": 9.532931327819824,
+      "effective_sinr_db_p10": 2.333104133605957,
+      "cond_A_mean": 4.797388076782227,
+      "cond_A_p95": 12.65145492553711,
+      "noise_power_mean": 0.00032732071122154593
+    }
+  },
+  "condition": {
+    "0": {
+      "mean_cond_A": 4.797388076782227,
+      "p95_cond_A": 12.65145492553711
+    },
+    "5": {
+      "mean_cond_A": 4.797388076782227,
+      "p95_cond_A": 12.65145492553711
+    },
+    "10": {
+      "mean_cond_A": 4.797388076782227,
+      "p95_cond_A": 12.65145492553711
+    },
+    "15": {
+      "mean_cond_A": 4.797388076782227,
+      "p95_cond_A": 12.65145492553711
+    },
+    "20": {
+      "mean_cond_A": 4.797388076782227,
+      "p95_cond_A": 12.65145492553711
+    },
+    "25": {
+      "mean_cond_A": 4.797388076782227,
+      "p95_cond_A": 12.65145492553711
+    },
+    "30": {
+      "mean_cond_A": 4.797388076782227,
+      "p95_cond_A": 12.65145492553711
+    },
+    "35": {
+      "mean_cond_A": 4.797388076782227,
+      "p95_cond_A": 12.65145492553711
+    },
+    "40": {
+      "mean_cond_A": 4.797388076782227,
+      "p95_cond_A": 12.65145492553711
+    }
+  }
+}
