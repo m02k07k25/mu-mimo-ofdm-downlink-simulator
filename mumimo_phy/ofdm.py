@@ -34,5 +34,24 @@ def ofdm_modulate_freq(
     return np.concatenate([cp, time_no_cp], axis=-1).astype(np.complex64)
 
 
+def ofdm_demodulate_freq(
+    rx_time: np.ndarray,
+    *,
+    n_fft: int,
+    n_cp: int,
+    case: str = "linear",
+) -> np.ndarray:
+    n_fft = int(n_fft)
+    n_cp = int(n_cp)
+    rx_time = np.asarray(rx_time, dtype=np.complex64)
+    if str(case) == "cp_removal":
+        no_cp = rx_time[..., :n_fft]
+    else:
+        no_cp = rx_time[..., n_cp : n_cp + n_fft]
+    if no_cp.shape[-1] != n_fft:
+        raise ValueError(f"Expected {n_fft} FFT samples, got {no_cp.shape[-1]}")
+    return (np.fft.fft(no_cp, n=n_fft, axis=-1) / math.sqrt(n_fft)).astype(np.complex64)
+
+
 def precoded_tx_frequency(stream_freq: np.ndarray, w_precoder: np.ndarray) -> np.ndarray:
     return np.einsum("kts,sk->tk", w_precoder, stream_freq).astype(np.complex64)

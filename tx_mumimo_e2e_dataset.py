@@ -44,15 +44,15 @@ class MuMimoE2EConfig:
     antenna_spacing_lambda: float = 0.5
     scm_angle_spread_deg: float = 3.0
     snr_train_db: float = 40.0
-    snr_train_db_list: tuple[float, ...] = (15, 20, 25, 30, 35, 40)
+    snr_train_db_list: tuple[float, ...] = (40.0,)
     snr_test_db: tuple[float, ...] = (0, 5, 10, 15, 20, 25, 30, 35, 40)
     n_train_frames: int = 50000
     n_val_frames: int = 10000
     n_test_frames_per_snr: int = 10000
-    csit_error_var: float = 0.005
+    csit_error_var: float = 0.001
     precoder_norm: str = "column"
     case: str = "clipping"
-    clip_ratio: float = 1.6
+    clip_ratio: float = 1.7
     pilot_kind: str = "qpsk"
     rx_iq_gain_imbalance_db: float = 0.5
     rx_iq_phase_error_deg: float = 3.0
@@ -114,7 +114,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate raw end-to-end downlink MU-MIMO OFDM datasets."
     )
-    parser.add_argument("--out-dir", type=str, default="outputs_mumimo_e2e_64qam")
+    parser.add_argument("--out-dir", type=str, default="datasets/clip17_iq05_snr40")
     parser.add_argument("--modulation", type=str, default="64QAM", choices=["16QAM", "64QAM"])
     parser.add_argument("--n-users", type=int, default=2)
     parser.add_argument("--n-tx", type=int, default=8)
@@ -128,29 +128,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--antenna-spacing-lambda", type=float, default=0.5)
     parser.add_argument("--scm-angle-spread-deg", type=float, default=3.0)
     parser.add_argument(
-        "--snr-train-db",
-        type=float,
-        default=None,
-        help="Legacy single train/val SNR override. By default mixed train SNR 15 20 25 30 35 40 is used.",
-    )
-    parser.add_argument(
-        "--snr-train-db-list",
-        nargs="+",
-        type=float,
-        default=None,
-        help="Mixed SNR values for train/val frames. Defaults to 15 20 25 30 35 40.",
-    )
-    parser.add_argument(
-        "--snr-test-db",
-        nargs="+",
-        type=float,
-        default=None,
-        help="SNR sweep for test datasets. Defaults to 0 5 ... 40.",
-    )
-    parser.add_argument("--n-train-frames", type=int, default=50000)
-    parser.add_argument("--n-val-frames", type=int, default=10000)
-    parser.add_argument("--n-test-frames-per-snr", type=int, default=10000)
-    parser.add_argument(
         "--csit-error-var",
         type=float,
         default=0.001,
@@ -158,7 +135,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--precoder-norm", type=str, default="column", choices=["none", "column", "fro"])
     parser.add_argument("--case", type=str, default="clipping", choices=["linear", "cp_removal", "clipping"])
-    parser.add_argument("--clip-ratio", type=float, default=1.6)
+    parser.add_argument("--clip-ratio", type=float, default=1.7)
     parser.add_argument(
         "--pilot-kind",
         type=str,
@@ -649,12 +626,12 @@ def write_config(out_dir: Path, cfg: MuMimoE2EConfig) -> Path:
         "widely_linear_model": "y_rf = alpha * y_channel + beta * conj(y_channel)",
         "alpha": {"real": float(rf_alpha.real), "imag": float(rf_alpha.imag)},
         "beta": {"real": float(rf_beta.real), "imag": float(rf_beta.imag)},
-        "default_policy": "enabled by default for RF stress testing; use the True-H WL-MMSE receiver baseline as the RF-aware oracle",
+        "default_policy": "enabled by default for RF stress testing; use the True WL-H -> WL-MMSE receiver metric as a true-channel linear reference",
         "mild_stress_test_example": "0.5 dB I/Q gain imbalance, 3 degree I/Q phase error, 5 degree common phase rotation",
         "nonzero_warning": (
             "I/Q imbalance is a widely-linear RF impairment. With nonzero RF impairment, "
             "A_eff_true remains the pre-RF linear effective channel, so plain True-H and "
-            "LMMSE channel-estimation baselines are no longer strict oracle references."
+            "LMMSE channel-estimation baselines are no longer true-channel references."
         ),
     }
     data["test_snr_policy"] = (
@@ -705,20 +682,6 @@ def generate_all(cfg: MuMimoE2EConfig, out_dir: Path) -> None:
 
 
 def build_config(args: argparse.Namespace) -> MuMimoE2EConfig:
-    if args.snr_train_db_list is None:
-        if args.snr_train_db is None:
-            snr_train_db_list: Sequence[float] = MuMimoE2EConfig.snr_train_db_list
-        else:
-            snr_train_db_list = (float(args.snr_train_db),)
-    else:
-        snr_train_db_list = tuple(float(x) for x in args.snr_train_db_list)
-    snr_train_db = float(args.snr_train_db) if args.snr_train_db is not None else float(tuple(snr_train_db_list)[-1])
-
-    if args.snr_test_db is None:
-        snr_test_db: Sequence[float] = MuMimoE2EConfig.snr_test_db
-    else:
-        snr_test_db = tuple(float(x) for x in args.snr_test_db)
-
     return MuMimoE2EConfig(
         n_fft=int(args.n_fft),
         n_cp=int(args.n_cp),
@@ -732,12 +695,12 @@ def build_config(args: argparse.Namespace) -> MuMimoE2EConfig:
         carrier_freq_hz=float(args.carrier_freq_hz),
         antenna_spacing_lambda=float(args.antenna_spacing_lambda),
         scm_angle_spread_deg=float(args.scm_angle_spread_deg),
-        snr_train_db=snr_train_db,
-        snr_train_db_list=tuple(snr_train_db_list),
-        snr_test_db=tuple(snr_test_db),
-        n_train_frames=int(args.n_train_frames),
-        n_val_frames=int(args.n_val_frames),
-        n_test_frames_per_snr=int(args.n_test_frames_per_snr),
+        snr_train_db=MuMimoE2EConfig.snr_train_db,
+        snr_train_db_list=MuMimoE2EConfig.snr_train_db_list,
+        snr_test_db=MuMimoE2EConfig.snr_test_db,
+        n_train_frames=MuMimoE2EConfig.n_train_frames,
+        n_val_frames=MuMimoE2EConfig.n_val_frames,
+        n_test_frames_per_snr=MuMimoE2EConfig.n_test_frames_per_snr,
         csit_error_var=float(args.csit_error_var),
         precoder_norm=str(args.precoder_norm),
         case=str(args.case),

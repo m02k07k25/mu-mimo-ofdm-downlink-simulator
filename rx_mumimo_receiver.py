@@ -5,72 +5,79 @@ import csv
 import json
 import math
 from pathlib import Path
-from typing import Any, Iterable, Union
+from typing import Any, Iterable
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from mumimo_phy import rf_impairment_widely_linear_coefficients
+from mumimo_phy import (
+    bits_per_symbol,
+    ofdm_demodulate_freq,
+    qam_demodulate,
+    rf_impairment_widely_linear_coefficients,
+)
+
+
+DEFAULT_CE_EPOCHS = 50
+DEFAULT_SD_EPOCHS = 100
+DEFAULT_BILSTM_EPOCHS = 100
+DEFAULT_BATCH_SIZE = 512
+DEFAULT_CE_LR = 1e-3
+DEFAULT_SD_LR = 1e-3
+DEFAULT_CE_LR_STEP = 25
+DEFAULT_SD_LR_STEP = 25
+DEFAULT_BILSTM_LR_STEP = 100
+DEFAULT_CE_LR_GAMMA = 0.5
+DEFAULT_SD_LR_GAMMA = 0.5
+DEFAULT_GROUP_SIZE = 8
+DEFAULT_HIDDEN_DIM = 256
+DEFAULT_CE_HIDDEN_DIM = 512
+DEFAULT_CE_DROPOUT = 0.05
+DEFAULT_BILSTM_HIDDEN_DIMS = (64, 32, 16)
+DEFAULT_LMMSE_RIDGE = 1e-6
+DEFAULT_SEED = 7
+DEFAULT_LOG_EVERY = 10
+TRAIN_ONLY_SNR_DB = 40.0
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train and evaluate a raw end-to-end MU-MIMO ComNet OFDM receiver."
     )
-    parser.add_argument("--dataset-dir", type=str, default="outputs_mumimo_e2e_16qam_smoke")
-    parser.add_argument("--result-dir", type=str, default="results_mumimo_e2e_16qam_smoke")
+    parser.add_argument("--dataset-dir", type=str, default="datasets/clip17_iq05_snr40")
+    parser.add_argument("--result-dir", type=str, default="results/clip17_iq05_snr40_linearce_sdcompare")
     parser.add_argument(
         "--mode",
         type=str,
         default="train-all",
         choices=["train-all", "train-ce", "train-sd", "eval"],
     )
-    parser.add_argument("--sd-type", type=str, default="both", choices=["fc", "bilstm", "both"])
+    parser.add_argument("--sd-type", type=str, default="bilstm", choices=["bilstm"])
     parser.add_argument("--sd-loss", type=str, default="mse", choices=["mse", "bce"])
     parser.add_argument(
         "--sd-feature-set",
         type=str,
-        default="reliability",
-        choices=["basic", "reliability", "rf-reliability"],
+        default="wl-zf-reliability",
+        choices=["wl-zf-reliability"],
     )
-    parser.add_argument("--ce-type", type=str, default="resmlp", choices=["linear", "resmlp", "blend-resmlp"])
-    parser.add_argument("--ce-init", type=str, default="lmmse", choices=["identity", "lmmse"])
+    parser.add_argument("--ce-type", type=str, default="linear", choices=["linear"])
+    parser.add_argument("--ce-init", type=str, default="lmmse", choices=["lmmse"])
     parser.add_argument(
         "--ce-target",
         type=str,
         default="auto",
-        choices=["auto", "pre-rf", "rf-linear"],
+        choices=["auto", "pre-rf", "rf-linear", "wl-rf"],
         help=(
-            "Channel target for LMMSE/ComNet CE. auto uses rf-linear when RF "
-            "impairment is enabled, otherwise pre-rf. rf-linear trains CE toward "
-            "alpha * A_eff_true, which matches the desired linear term seen by "
-            "plain ZF/MMSE under I/Q imbalance while treating mirror leakage as interference."
+            "Channel target for LMMSE/ComNet CE. auto uses wl-rf. wl-rf trains CE "
+            "on the augmented widely-linear (A,B) channel; when RF impairment is "
+            "zero, the conjugate branch is simply zero."
         ),
     )
     parser.add_argument("--ce-checkpoint", type=str, default=None)
-    parser.add_argument("--fc-checkpoint", type=str, default=None)
     parser.add_argument("--bilstm-checkpoint", type=str, default=None)
     parser.add_argument("--lmmse-checkpoint", type=str, default=None)
-    parser.add_argument("--ce-epochs", type=int, default=50)
-    parser.add_argument("--sd-epochs", type=int, default=50)
-    parser.add_argument("--bilstm-epochs", type=int, default=300)
-    parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--ce-lr", type=float, default=1e-3)
-    parser.add_argument("--sd-lr", type=float, default=1e-3)
-    parser.add_argument("--bilstm-lr", type=float, default=None)
-    parser.add_argument("--ce-lr-step", type=int, default=25)
-    parser.add_argument("--sd-lr-step", type=int, default=25)
-    parser.add_argument("--bilstm-lr-step", type=int, default=100)
-    parser.add_argument("--ce-lr-gamma", type=float, default=0.5)
-    parser.add_argument("--sd-lr-gamma", type=float, default=0.5)
-    parser.add_argument("--group-size", type=int, default=8)
-    parser.add_argument("--hidden-dim", type=int, default=256)
-    parser.add_argument("--ce-hidden-dim", type=int, default=512)
-    parser.add_argument("--ce-dropout", type=float, default=0.05)
-    parser.add_argument("--bilstm-hidden-dims", nargs=3, type=int, default=(64, 32, 16))
-    parser.add_argument("--lmmse-ridge", type=float, default=1e-6)
     parser.add_argument(
         "--lmmse-mode",
         type=str,
@@ -84,118 +91,40 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--eps", type=float, default=1e-8)
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--log-every", type=int, default=10)
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.ce_epochs = DEFAULT_CE_EPOCHS
+    args.sd_epochs = DEFAULT_SD_EPOCHS
+    args.bilstm_epochs = DEFAULT_BILSTM_EPOCHS
+    args.batch_size = DEFAULT_BATCH_SIZE
+    args.ce_lr = DEFAULT_CE_LR
+    args.sd_lr = DEFAULT_SD_LR
+    args.bilstm_lr = DEFAULT_SD_LR
+    args.ce_lr_step = DEFAULT_CE_LR_STEP
+    args.sd_lr_step = DEFAULT_SD_LR_STEP
+    args.bilstm_lr_step = DEFAULT_BILSTM_LR_STEP
+    args.ce_lr_gamma = DEFAULT_CE_LR_GAMMA
+    args.sd_lr_gamma = DEFAULT_SD_LR_GAMMA
+    args.group_size = DEFAULT_GROUP_SIZE
+    args.hidden_dim = DEFAULT_HIDDEN_DIM
+    args.ce_hidden_dim = DEFAULT_CE_HIDDEN_DIM
+    args.ce_dropout = DEFAULT_CE_DROPOUT
+    args.bilstm_hidden_dims = DEFAULT_BILSTM_HIDDEN_DIMS
+    args.lmmse_ridge = DEFAULT_LMMSE_RIDGE
+    args.seed = DEFAULT_SEED
+    args.log_every = DEFAULT_LOG_EVERY
+    return args
 
 
-def bits_per_symbol(modulation: str) -> int:
-    table = {"QPSK": 2, "16QAM": 4, "64QAM": 6}
-    key = modulation.upper()
-    if key not in table:
-        raise ValueError(f"Unsupported modulation: {modulation}")
-    return table[key]
-
-
-def _pam_levels(axis_bits: int) -> np.ndarray:
-    if axis_bits == 1:
-        return np.array([1.0, -1.0], dtype=np.float64)
-    if axis_bits == 2:
-        return np.array([3.0, 1.0, -1.0, -3.0], dtype=np.float64)
-    if axis_bits == 3:
-        return np.array([7.0, 5.0, 3.0, 1.0, -1.0, -3.0, -5.0, -7.0], dtype=np.float64)
-    raise ValueError(f"Unsupported PAM axis bit count: {axis_bits}")
-
-
-def _gray_labels(axis_bits: int) -> np.ndarray:
-    labels = np.arange(2**axis_bits, dtype=np.int64)
-    return labels ^ (labels >> 1)
-
-
-def _ints_to_bits(values: np.ndarray, width: int) -> np.ndarray:
-    values = np.asarray(values, dtype=np.int64).reshape(-1)
-    out = np.zeros((values.size, width), dtype=np.int8)
-    for bit_pos in range(width):
-        shift = width - 1 - bit_pos
-        out[:, bit_pos] = ((values >> shift) & 1).astype(np.int8)
-    return out
-
-
-def _qam_normalization(modulation: str) -> float:
-    bps = bits_per_symbol(modulation)
-    if bps == 2:
-        return math.sqrt(2.0)
-    if bps == 4:
-        return math.sqrt(10.0)
-    if bps == 6:
-        return math.sqrt(42.0)
-    raise ValueError(f"Unsupported modulation: {modulation}")
-
-
-def qam_demodulate(symbols: np.ndarray, modulation: str) -> np.ndarray:
-    modulation = modulation.upper()
-    symbols = np.asarray(symbols).reshape(-1)
-    bps = bits_per_symbol(modulation)
-
-    if modulation == "QPSK":
-        s = symbols * _qam_normalization(modulation)
-        bits = np.zeros((symbols.size, 2), dtype=np.int8)
-        bits[:, 0] = (s.real < 0).astype(np.int8)
-        bits[:, 1] = (s.imag < 0).astype(np.int8)
-        return bits
-
-    axis_bits = bps // 2
-    labels = _gray_labels(axis_bits)
-    levels = _pam_levels(axis_bits)
-    s = symbols * _qam_normalization(modulation)
-    re_index = np.argmin(np.abs(s.real[:, None] - levels[None, :]), axis=1)
-    im_index = np.argmin(np.abs(s.imag[:, None] - levels[None, :]), axis=1)
-    re_bits = _ints_to_bits(labels[re_index], axis_bits)
-    im_bits = _ints_to_bits(labels[im_index], axis_bits)
-    return np.concatenate([re_bits, im_bits], axis=1).astype(np.int8)
-
-
-class MuMimoCERefineNet(nn.Module):
-    def __init__(self, input_dim: int) -> None:
-        super().__init__()
-        self.input_dim = int(input_dim)
-        self.linear = nn.Linear(self.input_dim, self.input_dim, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear(x)
-
-    def init_identity(self) -> None:
-        with torch.no_grad():
-            self.linear.weight.copy_(torch.eye(self.input_dim, device=self.linear.weight.device))
-
-    def init_base(self, weight: torch.Tensor) -> None:
-        if tuple(weight.shape) != (self.input_dim, self.input_dim):
-            raise ValueError(f"Expected CE weight shape {(self.input_dim, self.input_dim)}, got {tuple(weight.shape)}")
-        with torch.no_grad():
-            self.linear.weight.copy_(weight)
-
-
-class MuMimoCEResMLPNet(nn.Module):
+class MuMimoCELinearNet(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int = 512, dropout: float = 0.05) -> None:
         super().__init__()
         self.input_dim = int(input_dim)
         self.hidden_dim = int(hidden_dim)
         self.dropout = float(dropout)
         self.base = nn.Linear(self.input_dim, self.input_dim, bias=False)
-        self.residual = nn.Sequential(
-            nn.Linear(self.input_dim, self.hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(self.dropout),
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(self.dropout),
-            nn.Linear(self.hidden_dim, self.input_dim),
-        )
-        nn.init.zeros_(self.residual[-1].weight)
-        nn.init.zeros_(self.residual[-1].bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.base(x) + self.residual(x)
+        return self.base(x)
 
     def init_identity(self) -> None:
         with torch.no_grad():
@@ -208,35 +137,7 @@ class MuMimoCEResMLPNet(nn.Module):
             self.base.weight.copy_(weight)
 
 
-class MuMimoCEBlendResidualNet(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int = 512, dropout: float = 0.05) -> None:
-        super().__init__()
-        self.input_dim = int(input_dim)
-        self.hidden_dim = int(hidden_dim)
-        self.dropout = float(dropout)
-        self.residual = nn.Sequential(
-            nn.Linear(self.input_dim, self.hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(self.dropout),
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(self.dropout),
-            nn.Linear(self.hidden_dim, self.input_dim),
-        )
-        nn.init.zeros_(self.residual[-1].weight)
-        nn.init.zeros_(self.residual[-1].bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.residual(x)
-
-    def init_identity(self) -> None:
-        pass
-
-    def init_base(self, weight: torch.Tensor) -> None:
-        del weight
-
-
-MuMimoCEModel = Union[MuMimoCERefineNet, MuMimoCEResMLPNet, MuMimoCEBlendResidualNet]
+MuMimoCEModel = MuMimoCELinearNet
 
 
 def build_ce_model(
@@ -248,39 +149,8 @@ def build_ce_model(
 ) -> MuMimoCEModel:
     ce_type = str(ce_type).lower()
     if ce_type == "linear":
-        return MuMimoCERefineNet(input_dim)
-    if ce_type == "resmlp":
-        return MuMimoCEResMLPNet(input_dim, hidden_dim=hidden_dim, dropout=dropout)
-    if ce_type == "blend-resmlp":
-        return MuMimoCEBlendResidualNet(input_dim, hidden_dim=hidden_dim, dropout=dropout)
+        return MuMimoCELinearNet(input_dim, hidden_dim=hidden_dim, dropout=dropout)
     raise ValueError(f"Unsupported CE type: {ce_type}")
-
-
-class MuMimoFCSDNet(nn.Module):
-    def __init__(
-        self,
-        group_size: int,
-        bits_per_symbol_value: int,
-        hidden_dim: int,
-        feature_dim: int = 2,
-        sd_feature_set: str = "basic",
-    ) -> None:
-        super().__init__()
-        self.group_size = int(group_size)
-        self.bits_per_symbol = int(bits_per_symbol_value)
-        self.hidden_dim = int(hidden_dim)
-        self.feature_dim = int(feature_dim)
-        self.sd_feature_set = str(sd_feature_set)
-        self.net = nn.Sequential(
-            nn.Linear(self.feature_dim * self.group_size, self.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim, self.hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim // 2, self.group_size * self.bits_per_symbol),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
 
 
 class MuMimoBiLSTMSDNet(nn.Module):
@@ -290,8 +160,8 @@ class MuMimoBiLSTMSDNet(nn.Module):
         bits_per_symbol_value: int,
         group_size: int,
         hidden_dims: tuple[int, int, int] = (64, 32, 16),
-        feature_dim: int = 6,
-        sd_feature_set: str = "basic",
+        feature_dim: int = 9,
+        sd_feature_set: str = "wl-zf-reliability",
     ) -> None:
         super().__init__()
         self.n_fft = int(n_fft)
@@ -304,28 +174,11 @@ class MuMimoBiLSTMSDNet(nn.Module):
             raise ValueError("n_fft must be divisible by group_size")
         if len(self.hidden_dims) != 3 or min(self.hidden_dims) <= 0:
             raise ValueError("hidden_dims must contain three positive integers")
-        if self.feature_dim <= 0:
-            raise ValueError("feature_dim must be positive")
         self.n_groups = self.n_fft // self.group_size
         h1, h2, h3 = self.hidden_dims
-        self.lstm1 = nn.LSTM(
-            input_size=self.feature_dim,
-            hidden_size=h1,
-            batch_first=True,
-            bidirectional=True,
-        )
-        self.lstm2 = nn.LSTM(
-            input_size=2 * h1,
-            hidden_size=h2,
-            batch_first=True,
-            bidirectional=True,
-        )
-        self.lstm3 = nn.LSTM(
-            input_size=2 * h2,
-            hidden_size=h3,
-            batch_first=True,
-            bidirectional=True,
-        )
+        self.lstm1 = nn.LSTM(self.feature_dim, h1, batch_first=True, bidirectional=True)
+        self.lstm2 = nn.LSTM(2 * h1, h2, batch_first=True, bidirectional=True)
+        self.lstm3 = nn.LSTM(2 * h2, h3, batch_first=True, bidirectional=True)
         self.output = nn.Linear(2 * h3 * self.group_size, self.group_size * self.bits_per_symbol)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -363,33 +216,72 @@ def load_npz(path: Path) -> dict[str, np.ndarray]:
 
 
 def ofdm_demodulate(rx_time: np.ndarray, cfg: dict[str, Any]) -> np.ndarray:
-    n_fft = int(cfg["n_fft"])
-    n_cp = int(cfg["n_cp"])
-    rx_time = np.asarray(rx_time, dtype=np.complex64)
-    if str(cfg.get("case", "linear")) == "cp_removal":
-        no_cp = rx_time[..., :n_fft]
-    else:
-        no_cp = rx_time[..., n_cp : n_cp + n_fft]
-    if no_cp.shape[-1] != n_fft:
-        raise ValueError(f"Expected {n_fft} FFT samples, got {no_cp.shape[-1]}")
-    return (np.fft.fft(no_cp, n=n_fft, axis=-1) / math.sqrt(n_fft)).astype(np.complex64)
-
-
-def rf_impairment_enabled(cfg: dict[str, Any]) -> bool:
-    return bool(
-        float(cfg.get("rx_iq_gain_imbalance_db", 0.0)) != 0.0
-        or float(cfg.get("rx_iq_phase_error_deg", 0.0)) != 0.0
-        or float(cfg.get("rx_common_phase_error_deg", 0.0)) != 0.0
+    return ofdm_demodulate_freq(
+        rx_time,
+        n_fft=int(cfg["n_fft"]),
+        n_cp=int(cfg["n_cp"]),
+        case=str(cfg.get("case", "linear")),
     )
 
 
 def resolve_ce_target_mode(ce_target: str, cfg: dict[str, Any]) -> str:
     ce_target = str(ce_target).lower()
     if ce_target == "auto":
-        return "rf-linear" if rf_impairment_enabled(cfg) else "pre-rf"
-    if ce_target in {"pre-rf", "rf-linear"}:
+        return "wl-rf"
+    if ce_target in {"pre-rf", "rf-linear", "wl-rf"}:
         return ce_target
     raise ValueError(f"Unsupported CE target: {ce_target}")
+
+
+def is_wl_ce_target(ce_target: str, cfg: dict[str, Any]) -> bool:
+    return resolve_ce_target_mode(ce_target, cfg) == "wl-rf"
+
+
+def rf_wl_coefficients(cfg: dict[str, Any]) -> tuple[complex, complex]:
+    return rf_impairment_widely_linear_coefficients(
+        iq_gain_imbalance_db=float(cfg.get("rx_iq_gain_imbalance_db", 0.0)),
+        iq_phase_error_deg=float(cfg.get("rx_iq_phase_error_deg", 0.0)),
+        common_phase_error_deg=float(cfg.get("rx_common_phase_error_deg", 0.0)),
+    )
+
+
+def mirror_subcarrier_indices(n_fft: int) -> np.ndarray:
+    return (-np.arange(int(n_fft), dtype=np.int64)) % int(n_fft)
+
+
+def make_wl_channel_from_pre_rf(a_pre_rf: np.ndarray, cfg: dict[str, Any]) -> np.ndarray:
+    a_pre_rf = np.asarray(a_pre_rf, dtype=np.complex64)
+    alpha, beta = rf_wl_coefficients(cfg)
+    mirror = mirror_subcarrier_indices(a_pre_rf.shape[1])
+    a_wl = (np.complex64(alpha) * a_pre_rf).astype(np.complex64)
+    b_wl = (np.complex64(beta) * np.conj(a_pre_rf[:, mirror])).astype(np.complex64)
+    return np.concatenate([a_wl, b_wl], axis=-1).astype(np.complex64)
+
+
+def split_wl_channel(ab_wl: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    ab_wl = np.asarray(ab_wl, dtype=np.complex64)
+    if ab_wl.shape[-1] % 2 != 0:
+        raise ValueError(f"Expected augmented WL channel with even last dim, got {ab_wl.shape}")
+    half = ab_wl.shape[-1] // 2
+    return ab_wl[..., :half], ab_wl[..., half:]
+
+
+def is_augmented_wl_channel(values: np.ndarray, cfg: dict[str, Any]) -> bool:
+    values = np.asarray(values)
+    n_streams = int(cfg.get("n_streams", cfg["n_users"]))
+    return values.ndim >= 1 and values.shape[-1] == 2 * n_streams
+
+
+def as_wl_channel(values: np.ndarray, cfg: dict[str, Any], ce_target: str) -> np.ndarray:
+    values = np.asarray(values, dtype=np.complex64)
+    if is_augmented_wl_channel(values, cfg):
+        return values
+    mode = resolve_ce_target_mode(ce_target, cfg)
+    if mode == "rf-linear":
+        alpha, _ = rf_wl_coefficients(cfg)
+        if abs(alpha) > 1e-12:
+            values = (values / np.complex64(alpha)).astype(np.complex64)
+    return make_wl_channel_from_pre_rf(values, cfg)
 
 
 def make_ce_target(a_true: np.ndarray, cfg: dict[str, Any], ce_target: str) -> np.ndarray:
@@ -398,13 +290,55 @@ def make_ce_target(a_true: np.ndarray, cfg: dict[str, Any], ce_target: str) -> n
     if mode == "pre-rf":
         return a_true
     if mode == "rf-linear":
-        alpha, _ = rf_impairment_widely_linear_coefficients(
-            iq_gain_imbalance_db=float(cfg.get("rx_iq_gain_imbalance_db", 0.0)),
-            iq_phase_error_deg=float(cfg.get("rx_iq_phase_error_deg", 0.0)),
-            common_phase_error_deg=float(cfg.get("rx_common_phase_error_deg", 0.0)),
-        )
+        alpha, _ = rf_wl_coefficients(cfg)
         return (np.complex64(alpha) * a_true).astype(np.complex64)
+    if mode == "wl-rf":
+        return make_wl_channel_from_pre_rf(a_true, cfg)
     raise ValueError(f"Unsupported CE target: {ce_target}")
+
+
+def wl_ls_from_pilots(
+    y_p_slots: np.ndarray,
+    x_p: np.ndarray,
+    cfg: dict[str, Any],
+    eps: float,
+) -> np.ndarray:
+    y_p_slots = np.asarray(y_p_slots, dtype=np.complex64)
+    x_p = np.asarray(x_p, dtype=np.complex64)
+    n_frames, n_streams, n_users, n_rx, n_fft = y_p_slots.shape
+    alpha, beta = rf_wl_coefficients(cfg)
+    det = (abs(alpha) ** 2) - (abs(beta) ** 2)
+    if abs(det) < float(eps):
+        raise ValueError("I/Q imbalance WL coefficient matrix is singular; cannot form WL-LS")
+
+    a_pre = np.zeros((n_frames, n_fft, n_users, n_rx, n_streams), dtype=np.complex64)
+    for stream_id in range(n_streams):
+        visited: set[int] = set()
+        pilots = x_p[:, stream_id, stream_id, :]
+        for subcarrier in range(n_fft):
+            if subcarrier in visited:
+                continue
+            mirror = (-subcarrier) % n_fft
+            visited.add(subcarrier)
+            visited.add(mirror)
+
+            x_k = pilots[:, subcarrier]
+            y_k = y_p_slots[:, stream_id, :, :, subcarrier]
+            safe_x_k = np.where(np.abs(x_k) < eps, eps + 0j, x_k)
+            if mirror == subcarrier:
+                u_k = (np.conj(alpha) * y_k - beta * np.conj(y_k)) / det
+                a_pre[:, subcarrier, :, :, stream_id] = u_k / safe_x_k[:, None, None]
+                continue
+
+            x_m = pilots[:, mirror]
+            y_m = y_p_slots[:, stream_id, :, :, mirror]
+            safe_x_m_conj = np.where(np.abs(x_m) < eps, eps + 0j, np.conj(x_m))
+            u_k = (np.conj(alpha) * y_k - beta * np.conj(y_m)) / det
+            v_m = (-np.conj(beta) * y_k + alpha * np.conj(y_m)) / det
+            a_pre[:, subcarrier, :, :, stream_id] = u_k / safe_x_k[:, None, None]
+            a_pre[:, mirror, :, :, stream_id] = np.conj(v_m / safe_x_m_conj[:, None, None])
+
+    return make_wl_channel_from_pre_rf(a_pre, cfg)
 
 
 def preprocess_split(
@@ -418,21 +352,30 @@ def preprocess_split(
     x_p = np.asarray(raw["x_p_freq"], dtype=np.complex64)
     n_frames, n_streams, n_users, n_rx, n_fft = y_p_slots.shape
 
-    a_ls = np.zeros((n_frames, n_fft, n_users, n_rx, n_streams), dtype=np.complex64)
+    a_plain_ls = np.zeros((n_frames, n_fft, n_users, n_rx, n_streams), dtype=np.complex64)
     for stream_id in range(n_streams):
         denom = x_p[:, stream_id, stream_id, :]
         safe_den = np.where(np.abs(denom) < eps, eps + 0j, denom)
         y_slot = np.transpose(y_p_slots[:, stream_id], (0, 3, 1, 2))
-        a_ls[..., stream_id] = y_slot / safe_den[:, :, None, None]
+        a_plain_ls[..., stream_id] = y_slot / safe_den[:, :, None, None]
 
     a_true = np.asarray(raw["A_eff_true"], dtype=np.complex64)
+    mode = resolve_ce_target_mode(ce_target, cfg)
+    a_ce_target = make_ce_target(a_true, cfg, ce_target)
+    a_wl_true = make_wl_channel_from_pre_rf(a_true, cfg)
+    a_wl_ls = wl_ls_from_pilots(y_p_slots, x_p, cfg, eps) if mode == "wl-rf" else None
+    a_ls = a_wl_ls if a_wl_ls is not None else a_plain_ls
 
     return {
         "y_p": y_p_slots,
         "y_d": np.transpose(y_d_urk, (0, 3, 1, 2)).astype(np.complex64),
         "a_ls": a_ls,
+        "a_plain_ls": a_plain_ls,
+        "a_wl_ls": a_wl_ls if a_wl_ls is not None else make_wl_channel_from_pre_rf(a_plain_ls, cfg),
         "a_true": a_true,
-        "a_ce_target": make_ce_target(a_true, cfg, ce_target),
+        "a_ce_target": a_ce_target,
+        "a_wl_true": a_wl_true,
+        "a_linear_target": make_ce_target(a_true, cfg, "rf-linear"),
         "bits": np.asarray(raw["bits"], dtype=np.int8),
         "x_d_freq": np.asarray(raw["x_d_freq"], dtype=np.complex64),
         "snr_db": np.asarray(raw["snr_db"], dtype=np.float32),
@@ -450,11 +393,35 @@ def preprocess_split(
     }
 
 
-def ce_feature_dim(cfg: dict[str, Any]) -> int:
+def filter_split_by_snr(
+    data: dict[str, np.ndarray],
+    target_snr_db: float,
+    *,
+    atol: float = 1e-4,
+) -> dict[str, np.ndarray]:
+    snr_db = np.asarray(data["snr_db"], dtype=np.float32).reshape(-1)
+    mask = np.isclose(snr_db, float(target_snr_db), atol=float(atol))
+    if not np.any(mask):
+        available = sorted(float(x) for x in np.unique(snr_db))
+        raise ValueError(f"No frames found for SNR={target_snr_db:g} dB. Available train SNRs: {available}")
+    n_frames = snr_db.shape[0]
+    filtered: dict[str, np.ndarray] = {}
+    for key, value in data.items():
+        if isinstance(value, np.ndarray) and value.shape[:1] == (n_frames,):
+            filtered[key] = value[mask]
+        else:
+            filtered[key] = value
+    print(f"[DATA] using SNR={target_snr_db:g} dB only for training/validation: {int(np.sum(mask))}/{n_frames} frames")
+    return filtered
+
+
+def ce_feature_dim(cfg: dict[str, Any], ce_target: str = "pre-rf") -> int:
     n_fft = int(cfg["n_fft"])
     n_users = int(cfg["n_users"])
     n_streams = int(cfg.get("n_streams", n_users))
     n_rx = int(cfg["n_rx_per_ue"])
+    if is_wl_ce_target(ce_target, cfg):
+        n_streams *= 2
     return 2 * n_fft * n_rx * n_streams
 
 
@@ -563,46 +530,6 @@ def linear_detect(
         return estimates.astype(np.complex64)
 
 
-def linear_detect_with_gain(
-    y_d: np.ndarray,
-    a_eff: np.ndarray,
-    noise_power: np.ndarray,
-    *,
-    method: str,
-    eps: float,
-) -> tuple[np.ndarray, np.ndarray] | None:
-    n_frames, _, _, n_rx = y_d.shape
-    n_streams = a_eff.shape[-1]
-    if method == "zf" and n_streams > n_rx:
-        return None
-
-    ah = np.swapaxes(np.conj(a_eff), -1, -2)
-    gram = np.matmul(ah, a_eff)
-    matched = np.matmul(ah, y_d[..., None])[..., 0]
-    eye = np.eye(n_streams, dtype=np.complex64)
-
-    if method == "zf":
-        system = gram + (float(eps) * eye)[None, None, None, :, :]
-    elif method == "mmse":
-        sigma2 = np.asarray(noise_power, dtype=np.float32).reshape(n_frames, 1, 1, 1, 1)
-        system = gram + sigma2 * eye[None, None, None, :, :]
-    else:
-        raise ValueError(f"Unsupported detector: {method}")
-
-    try:
-        estimates = np.linalg.solve(system, matched[..., None])[..., 0]
-        response = np.linalg.solve(system, gram)
-    except np.linalg.LinAlgError:
-        pinv = np.linalg.pinv(system)
-        estimates = np.matmul(pinv, matched[..., None])[..., 0]
-        response = np.matmul(pinv, gram)
-
-    gain = np.diagonal(response, axis1=-2, axis2=-1)
-    if method == "mmse":
-        estimates = estimates / np.where(np.abs(gain) > eps, gain, 1.0 + 0.0j)
-    return estimates.astype(np.complex64), gain.astype(np.complex64)
-
-
 def _complex_channel_real_matrix(a_eff: np.ndarray) -> np.ndarray:
     a_eff = np.asarray(a_eff, dtype=np.complex64)
     *leading, n_rx, n_streams = a_eff.shape
@@ -616,24 +543,16 @@ def _complex_channel_real_matrix(a_eff: np.ndarray) -> np.ndarray:
     return out
 
 
-def _conjugated_output_real_matrix(base: np.ndarray) -> np.ndarray:
-    out = np.array(base, copy=True)
-    n_rows = out.shape[-2]
-    n_rx = n_rows // 2
-    out[..., n_rx:, :] *= -1.0
-    return out
-
-
-def _apply_complex_scalar_to_real_rows(base: np.ndarray, scalar: complex) -> np.ndarray:
-    out = np.zeros_like(base, dtype=np.float32)
-    n_rows = base.shape[-2]
-    n_rx = n_rows // 2
-    real = float(np.real(scalar))
-    imag = float(np.imag(scalar))
-    real_rows = base[..., :n_rx, :]
-    imag_rows = base[..., n_rx:, :]
-    out[..., :n_rx, :] = real * real_rows - imag * imag_rows
-    out[..., n_rx:, :] = imag * real_rows + real * imag_rows
+def _complex_conj_input_real_matrix(a_eff: np.ndarray) -> np.ndarray:
+    a_eff = np.asarray(a_eff, dtype=np.complex64)
+    *leading, n_rx, n_streams = a_eff.shape
+    out = np.zeros((*leading, 2 * n_rx, 2 * n_streams), dtype=np.float32)
+    real = a_eff.real.astype(np.float32, copy=False)
+    imag = a_eff.imag.astype(np.float32, copy=False)
+    out[..., :n_rx, :n_streams] = real
+    out[..., :n_rx, n_streams:] = imag
+    out[..., n_rx:, :n_streams] = imag
+    out[..., n_rx:, n_streams:] = -real
     return out
 
 
@@ -706,28 +625,24 @@ def _solve_real_mmse(
     return estimates.astype(np.float32)
 
 
-def rf_iq_wl_detect(
+def wl_detect(
     y_d: np.ndarray,
-    a_eff: np.ndarray,
+    ab_wl: np.ndarray,
     noise_power: np.ndarray,
-    cfg: dict[str, Any],
     *,
     method: str,
     eps: float,
 ) -> np.ndarray | None:
+    y_d = np.asarray(y_d, dtype=np.complex64)
+    a_wl, b_wl = split_wl_channel(ab_wl)
     n_frames, n_fft, n_users, n_rx = y_d.shape
-    n_streams = a_eff.shape[-1]
+    n_streams = a_wl.shape[-1]
     if method == "zf" and n_streams > n_rx:
         return None
 
-    alpha, beta = rf_impairment_widely_linear_coefficients(
-        iq_gain_imbalance_db=float(cfg.get("rx_iq_gain_imbalance_db", 0.0)),
-        iq_phase_error_deg=float(cfg.get("rx_iq_phase_error_deg", 0.0)),
-        common_phase_error_deg=float(cfg.get("rx_common_phase_error_deg", 0.0)),
-    )
     estimates = np.zeros((n_frames, n_fft, n_users, n_streams), dtype=np.complex64)
-    visited: set[int] = set()
     frame_noise_power = np.asarray(noise_power, dtype=np.float32)
+    visited: set[int] = set()
 
     for subcarrier in range(n_fft):
         if subcarrier in visited:
@@ -736,15 +651,11 @@ def rf_iq_wl_detect(
         visited.add(subcarrier)
         visited.add(mirror)
 
-        a_k = a_eff[:, subcarrier]
-        c_k = _complex_channel_real_matrix(a_k)
+        a_k = a_wl[:, subcarrier]
+        b_k = b_wl[:, subcarrier]
         y_k = _complex_grid_to_real(y_d[:, subcarrier])
         if mirror == subcarrier:
-            c_k_conj = _conjugated_output_real_matrix(c_k)
-            b_matrix = (
-                _apply_complex_scalar_to_real_rows(c_k, alpha)
-                + _apply_complex_scalar_to_real_rows(c_k_conj, beta)
-            )
+            b_matrix = _complex_channel_real_matrix(a_k) + _complex_conj_input_real_matrix(b_k)
             solved = _solve_real_mmse(
                 b_matrix,
                 y_k,
@@ -758,22 +669,20 @@ def rf_iq_wl_detect(
             ).astype(np.complex64)
             continue
 
-        a_m = a_eff[:, mirror]
-        c_m = _complex_channel_real_matrix(a_m)
-        c_k_conj = _conjugated_output_real_matrix(c_k)
-        c_m_conj = _conjugated_output_real_matrix(c_m)
+        a_m = a_wl[:, mirror]
+        b_m = b_wl[:, mirror]
         y_m = _complex_grid_to_real(y_d[:, mirror])
         y_pair = np.concatenate([y_k, y_m], axis=-1)
+
+        top_k = _complex_channel_real_matrix(a_k)
+        top_m = _complex_conj_input_real_matrix(b_k)
+        bottom_k = _complex_conj_input_real_matrix(b_m)
+        bottom_m = _complex_channel_real_matrix(a_m)
 
         b_matrix = np.zeros(
             (n_frames, n_users, 4 * n_rx, 4 * n_streams),
             dtype=np.float32,
         )
-        top_k = _apply_complex_scalar_to_real_rows(c_k, alpha)
-        top_m = _apply_complex_scalar_to_real_rows(c_m_conj, beta)
-        bottom_k = _apply_complex_scalar_to_real_rows(c_k_conj, beta)
-        bottom_m = _apply_complex_scalar_to_real_rows(c_m, alpha)
-
         b_matrix[..., : 2 * n_rx, :n_streams] = top_k[..., :n_streams]
         b_matrix[..., : 2 * n_rx, 2 * n_streams : 3 * n_streams] = top_k[..., n_streams:]
         b_matrix[..., : 2 * n_rx, n_streams : 2 * n_streams] = top_m[..., :n_streams]
@@ -810,18 +719,6 @@ def target_user_streams(full_stream_estimates: np.ndarray) -> np.ndarray:
     return out
 
 
-def desired_only_mrc(y_d: np.ndarray, a_eff: np.ndarray, eps: float) -> np.ndarray:
-    n_frames, n_fft, n_users, _ = y_d.shape
-    out = np.zeros((n_frames, n_users, n_fft), dtype=np.complex64)
-    for user_id in range(n_users):
-        a_desired = a_eff[:, :, user_id, :, user_id]
-        y_user = y_d[:, :, user_id, :]
-        numerator = np.sum(np.conj(a_desired) * y_user, axis=-1)
-        denominator = np.sum(np.abs(a_desired) ** 2, axis=-1)
-        out[:, user_id, :] = numerator / np.maximum(denominator, eps)
-    return out
-
-
 def ber_for_user_grid(symbols: np.ndarray, bits: np.ndarray, modulation: str) -> float:
     pred_bits = hard_demod_stream_grid(symbols, modulation)
     return bit_error_rate(pred_bits, bits)
@@ -844,22 +741,31 @@ def detector_ber(
     return ber_for_user_grid(target, bits, modulation), estimates
 
 
-def rf_iq_wl_detector_ber(
+def wl_detector_ber(
     y_d: np.ndarray,
-    a_eff: np.ndarray,
+    ab_wl: np.ndarray,
     noise_power: np.ndarray,
     bits: np.ndarray,
     modulation: str,
-    cfg: dict[str, Any],
     *,
     method: str,
     eps: float,
 ) -> tuple[float | None, np.ndarray | None]:
-    estimates = rf_iq_wl_detect(y_d, a_eff, noise_power, cfg, method=method, eps=eps)
+    estimates = wl_detect(y_d, ab_wl, noise_power, method=method, eps=eps)
     if estimates is None:
         return None, None
     target = target_user_streams(estimates)
     return ber_for_user_grid(target, bits, modulation), estimates
+
+
+def wl_reconstruct_y(ab_wl: np.ndarray, estimates: np.ndarray) -> np.ndarray:
+    a_wl, b_wl = split_wl_channel(ab_wl)
+    mirror = mirror_subcarrier_indices(a_wl.shape[1])
+    x_mirror = estimates[:, mirror]
+    return (
+        np.matmul(a_wl, estimates[..., None])[..., 0]
+        + np.matmul(b_wl, np.conj(x_mirror)[..., None])[..., 0]
+    ).astype(np.complex64)
 
 
 def should_log(epoch: int, epochs: int, log_every: int) -> bool:
@@ -1013,6 +919,8 @@ def save_lmmse_weight(
         "ridge": float(ridge),
         "ce_target": str(ce_target),
         "ce_target_resolved": resolve_ce_target_mode(str(ce_target), cfg),
+        "channel_representation": "augmented_wl_ab" if is_wl_ce_target(ce_target, cfg) else "linear_a",
+        "wl_lmmse_fit_split": "train" if is_wl_ce_target(ce_target, cfg) else "",
     }
     if mode == "global":
         arrays["weight_ri"] = np.asarray(estimator_dict["weight_ri"], dtype=np.float32)
@@ -1069,21 +977,25 @@ def get_lmmse_weight(
     cfg: dict[str, Any],
     args: argparse.Namespace,
     checkpoint_path: Path,
+    ce_target_override: str | None = None,
+    label: str = "LMMSE",
 ) -> dict[str, Any]:
     lmmse_mode = validate_lmmse_mode(str(args.lmmse_mode))
-    if lmmse_checkpoint_matches(checkpoint_path, cfg, str(args.ce_target), lmmse_mode):
+    ce_target = str(args.ce_target) if ce_target_override is None else str(ce_target_override)
+    if lmmse_checkpoint_matches(checkpoint_path, cfg, ce_target, lmmse_mode):
         return load_lmmse_weight(checkpoint_path)
     if checkpoint_path.exists():
         print(
             f"[WARN] LMMSE checkpoint target/mode does not match "
-            f"--ce-target={args.ce_target}, --lmmse-mode={lmmse_mode}; "
+            f"--ce-target={ce_target}, --lmmse-mode={lmmse_mode}; "
             f"refitting {checkpoint_path}"
         )
     train_path = find_one(dataset_dir, "train_snr*.npz")
-    train_data = preprocess_split(load_npz(train_path), cfg, float(args.eps), str(args.ce_target))
-    print(f"[FIT] empirical MU-MIMO LMMSE channel estimator (mode={lmmse_mode})")
+    train_data = preprocess_split(load_npz(train_path), cfg, float(args.eps), ce_target)
+    train_data = filter_split_by_snr(train_data, TRAIN_ONLY_SNR_DB)
+    print(f"[FIT] empirical MU-MIMO {label} channel estimator (mode={lmmse_mode}, split=train)")
     estimator = fit_lmmse_estimator(train_data, float(args.lmmse_ridge), lmmse_mode)
-    save_lmmse_weight(checkpoint_path, estimator, cfg, float(args.lmmse_ridge), str(args.ce_target))
+    save_lmmse_weight(checkpoint_path, estimator, cfg, float(args.lmmse_ridge), ce_target)
     return estimator
 
 
@@ -1098,15 +1010,6 @@ def normalize_lmmse_estimator(estimator: dict[str, Any] | np.ndarray) -> dict[st
 
 def lmmse_estimator_mode(estimator: dict[str, Any] | np.ndarray) -> str:
     return validate_lmmse_mode(str(normalize_lmmse_estimator(estimator).get("mode", "global")))
-
-
-def lmmse_global_weight(estimator: dict[str, Any] | np.ndarray) -> np.ndarray:
-    estimator_dict = normalize_lmmse_estimator(estimator)
-    if lmmse_estimator_mode(estimator_dict) == "global":
-        return np.asarray(estimator_dict["weight_ri"], dtype=np.float32)
-    if "global_weight_ri" in estimator_dict:
-        return np.asarray(estimator_dict["global_weight_ri"], dtype=np.float32)
-    return np.mean(np.asarray(estimator_dict["weights_ri"], dtype=np.float32), axis=0).astype(np.float32)
 
 
 def lmmse_snr_bins(estimator: dict[str, Any] | np.ndarray) -> list[float]:
@@ -1147,31 +1050,38 @@ def apply_lmmse_weight(
     return out.astype(np.complex64)
 
 
-def ls_lmmse_blend_weight(snr_db: np.ndarray, center_db: float = 27.5, width_db: float = 4.0) -> np.ndarray:
-    snr = np.asarray(snr_db, dtype=np.float32)
-    return (1.0 / (1.0 + np.exp(-(snr - float(center_db)) / max(float(width_db), 1e-6)))).astype(np.float32)
+def lmmse_init_matrix(lmmse_weight: dict[str, Any] | np.ndarray, input_dim: int) -> np.ndarray:
+    def candidate_matrix(value: Any) -> np.ndarray | None:
+        arr = np.asarray(value)
+        if arr.ndim == 2 and input_dim in arr.shape:
+            mat = arr.astype(np.float32, copy=False)
+            if mat.shape == (input_dim, input_dim):
+                return mat
+            if mat.T.shape == (input_dim, input_dim):
+                return mat.T
+        if arr.ndim == 3 and arr.shape[-2:] == (input_dim, input_dim):
+            return np.mean(arr.astype(np.float32, copy=False), axis=0)
+        if arr.ndim == 3 and arr.shape[-2:] == (input_dim, input_dim)[::-1]:
+            return np.mean(arr.astype(np.float32, copy=False), axis=0).T
+        return None
 
-
-def blend_ls_lmmse(a_ls: np.ndarray, a_lmmse: np.ndarray, snr_db: np.ndarray) -> np.ndarray:
-    weight = ls_lmmse_blend_weight(snr_db).reshape(-1, 1, 1, 1, 1)
-    return (weight * np.asarray(a_ls, dtype=np.complex64) + (1.0 - weight) * np.asarray(a_lmmse, dtype=np.complex64)).astype(
-        np.complex64
-    )
-
-
-def channel_for_wl_features(a_hat: np.ndarray, cfg: dict[str, Any], ce_target: str) -> np.ndarray:
-    mode = resolve_ce_target_mode(ce_target, cfg)
-    a_hat = np.asarray(a_hat, dtype=np.complex64)
-    if mode != "rf-linear":
-        return a_hat
-    alpha, _ = rf_impairment_widely_linear_coefficients(
-        iq_gain_imbalance_db=float(cfg.get("rx_iq_gain_imbalance_db", 0.0)),
-        iq_phase_error_deg=float(cfg.get("rx_iq_phase_error_deg", 0.0)),
-        common_phase_error_deg=float(cfg.get("rx_common_phase_error_deg", 0.0)),
-    )
-    if abs(alpha) <= 1e-12:
-        return a_hat
-    return (a_hat / np.complex64(alpha)).astype(np.complex64)
+    direct = candidate_matrix(lmmse_weight)
+    if direct is not None:
+        return direct
+    if isinstance(lmmse_weight, dict):
+        for key in ("weight", "weights", "W", "w"):
+            if key in lmmse_weight:
+                mat = candidate_matrix(lmmse_weight[key])
+                if mat is not None:
+                    return mat
+        matrices = [
+            candidate
+            for value in lmmse_weight.values()
+            if (candidate := candidate_matrix(value)) is not None
+        ]
+        if matrices:
+            return np.mean(np.stack(matrices, axis=0), axis=0).astype(np.float32)
+    raise ValueError("Could not extract a square LMMSE initialization matrix for the CE linear layer")
 
 
 def train_ce(
@@ -1184,7 +1094,7 @@ def train_ce(
     checkpoint_path: Path,
     lmmse_weight: dict[str, Any] | np.ndarray | None,
 ) -> MuMimoCEModel:
-    input_dim = ce_feature_dim(cfg)
+    input_dim = ce_feature_dim(cfg, str(args.ce_target))
     model = build_ce_model(
         str(args.ce_type),
         input_dim,
@@ -1192,30 +1102,16 @@ def train_ce(
         dropout=float(args.ce_dropout),
     ).to(device)
     ce_type = str(args.ce_type).lower()
-    if ce_type == "blend-resmlp":
-        if lmmse_weight is None:
-            raise ValueError("lmmse_weight is required for --ce-type blend-resmlp")
-    elif args.ce_init == "identity":
-        model.init_identity()
-    elif args.ce_init == "lmmse":
-        if lmmse_weight is None:
-            raise ValueError("lmmse_weight is required for --ce-init lmmse")
-        model.init_base(torch.from_numpy(lmmse_global_weight(lmmse_weight)).to(device))
+    if ce_type != "linear":
+        raise ValueError(f"Unsupported CE type after WL cleanup: {ce_type}")
+    if lmmse_weight is None:
+        raise ValueError("WL CE requires an LMMSE/WL-LMMSE estimator for linear-layer initialization")
 
-    if ce_type == "blend-resmlp":
-        a_train_lmmse = apply_lmmse_weight(train_data["a_ls"], lmmse_weight, train_data["snr_db"])
-        a_val_lmmse = apply_lmmse_weight(val_data["a_ls"], lmmse_weight, val_data["snr_db"])
-        a_train_base = blend_ls_lmmse(train_data["a_ls"], a_train_lmmse, train_data["snr_db"])
-        a_val_base = blend_ls_lmmse(val_data["a_ls"], a_val_lmmse, val_data["snr_db"])
-        x_train = ce_complex_to_ri(a_train_base)
-        y_train = ce_complex_to_ri(train_data["a_ce_target"] - a_train_base)
-        x_val = torch.from_numpy(ce_complex_to_ri(a_val_base)).to(device)
-        y_val = torch.from_numpy(ce_complex_to_ri(val_data["a_ce_target"] - a_val_base)).to(device)
-    else:
-        x_train = ce_complex_to_ri(train_data["a_ls"])
-        y_train = ce_complex_to_ri(train_data["a_ce_target"])
-        x_val = torch.from_numpy(ce_complex_to_ri(val_data["a_ls"])).to(device)
-        y_val = torch.from_numpy(ce_complex_to_ri(val_data["a_ce_target"])).to(device)
+    model.init_base(torch.from_numpy(lmmse_init_matrix(lmmse_weight, input_dim)).to(device))
+    x_train = ce_complex_to_ri(train_data["a_ls"])
+    y_train = ce_complex_to_ri(train_data["a_ce_target"])
+    x_val = torch.from_numpy(ce_complex_to_ri(val_data["a_ls"])).to(device)
+    y_val = torch.from_numpy(ce_complex_to_ri(val_data["a_ce_target"])).to(device)
 
     train_ds = TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train))
     generator = torch.Generator()
@@ -1236,6 +1132,9 @@ def train_ce(
     loss_fn = nn.MSELoss()
 
     history: list[dict[str, float]] = []
+    best_val_loss = math.inf
+    best_epoch = 0
+    best_state: dict[str, torch.Tensor] | None = None
     for epoch in range(1, int(args.ce_epochs) + 1):
         model.train()
         loss_sum = 0.0
@@ -1258,10 +1157,16 @@ def train_ce(
             val_loss = float(loss_fn(val_pred, y_val).item())
 
         train_loss = loss_sum / max(n_seen, 1)
+        is_best = val_loss < best_val_loss
+        if is_best:
+            best_val_loss = val_loss
+            best_epoch = epoch
+            best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
         row = {
             "epoch": float(epoch),
             "train_loss": float(train_loss),
             "val_loss": float(val_loss),
+            "best": float(is_best),
             "lr": float(optimizer.param_groups[0]["lr"]),
         }
         history.append(row)
@@ -1274,7 +1179,7 @@ def train_ce(
     write_history(
         Path(args.result_dir) / "train_history_ce.csv",
         history,
-        ["epoch", "train_loss", "val_loss", "lr"],
+        ["epoch", "train_loss", "val_loss", "best", "lr"],
     )
     save_training_plot(
         Path(args.result_dir) / "ce_training_curve.png",
@@ -1283,9 +1188,12 @@ def train_ce(
         include_ber=False,
     )
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    if best_state is None:
+        best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+    model.load_state_dict(best_state)
     torch.save(
         {
-            "state_dict": model.state_dict(),
+            "state_dict": best_state,
             "input_dim": input_dim,
             "modulation": str(cfg["modulation"]),
             "n_fft": int(cfg["n_fft"]),
@@ -1296,12 +1204,17 @@ def train_ce(
             "ce_init": str(args.ce_init),
             "ce_target": str(args.ce_target),
             "ce_target_resolved": resolve_ce_target_mode(str(args.ce_target), cfg),
+            "channel_representation": "augmented_wl_ab" if is_wl_ce_target(str(args.ce_target), cfg) else "linear_a",
+            "ce_init_resolved": "wl-lmmse" if is_wl_ce_target(str(args.ce_target), cfg) else str(args.ce_init),
+            "wl_lmmse_fit_split": "train" if is_wl_ce_target(str(args.ce_target), cfg) else "",
             "ce_hidden_dim": int(args.ce_hidden_dim),
             "ce_dropout": float(args.ce_dropout),
+            "best_epoch": int(best_epoch),
+            "best_val_loss": float(best_val_loss),
         },
         checkpoint_path,
     )
-    print(f"[SAVE] {checkpoint_path}")
+    print(f"[SAVE] {checkpoint_path} (best_epoch={best_epoch}, best_val_loss={best_val_loss:.6e})")
     return model
 
 
@@ -1310,60 +1223,18 @@ def load_ce_model(path: Path, cfg: dict[str, Any], device: torch.device) -> MuMi
     input_dim = int(checkpoint.get("input_dim", ce_feature_dim(cfg)))
     state_dict = checkpoint["state_dict"]
     ce_type = str(checkpoint.get("ce_type", "")).lower()
-    if ce_type not in {"linear", "resmlp", "blend-resmlp"}:
-        if "base.weight" in state_dict:
-            ce_type = "resmlp"
-        elif "residual.0.weight" in state_dict:
-            ce_type = "blend-resmlp"
-        else:
-            ce_type = "linear"
-    hidden_dim = int(
-        checkpoint.get(
-            "ce_hidden_dim",
-            state_dict["residual.0.weight"].shape[0] if "residual.0.weight" in state_dict else 512,
-        )
-    )
+    if ce_type != "linear":
+        raise ValueError(f"Legacy CE checkpoint is no longer supported: ce_type={ce_type!r}")
     model = build_ce_model(
         ce_type,
         input_dim,
-        hidden_dim=hidden_dim,
+        hidden_dim=int(checkpoint.get("ce_hidden_dim", 0)),
         dropout=float(checkpoint.get("ce_dropout", 0.0)),
     ).to(device)
     model.load_state_dict(state_dict)
     model.eval()
-    print(f"[LOAD] CE checkpoint: {path} (type={ce_type})")
+    print(f"[LOAD] WL linear CE checkpoint: {path} (type={ce_type})")
     return model
-
-
-def predict_ce(
-    model: MuMimoCEModel,
-    a_ls: np.ndarray,
-    *,
-    lmmse_weight: dict[str, Any] | np.ndarray | None = None,
-    snr_db: np.ndarray | None = None,
-    device: torch.device,
-    batch_size: int,
-) -> np.ndarray:
-    base: np.ndarray | None = None
-    if isinstance(model, MuMimoCEBlendResidualNet):
-        if lmmse_weight is None or snr_db is None:
-            raise ValueError("blend-resmlp CE prediction requires lmmse_weight and snr_db")
-        a_lmmse = apply_lmmse_weight(a_ls, lmmse_weight, snr_db)
-        base = blend_ls_lmmse(a_ls, a_lmmse, snr_db)
-        x = torch.from_numpy(ce_complex_to_ri(base))
-    else:
-        x = torch.from_numpy(ce_complex_to_ri(a_ls))
-    loader = DataLoader(TensorDataset(x), batch_size=int(batch_size), shuffle=False)
-    chunks: list[np.ndarray] = []
-    model.eval()
-    with torch.no_grad():
-        for (xb,) in loader:
-            pred = model(xb.to(device)).cpu().numpy()
-            chunks.append(pred)
-    pred_complex = ce_ri_to_complex_like(np.concatenate(chunks, axis=0), a_ls)
-    if base is not None:
-        return (base + pred_complex).astype(np.complex64)
-    return pred_complex
 
 
 def sd_loss_value(logits: torch.Tensor, target: torch.Tensor, sd_loss: str) -> torch.Tensor:
@@ -1376,35 +1247,14 @@ def sd_loss_value(logits: torch.Tensor, target: torch.Tensor, sd_loss: str) -> t
 
 def validate_sd_feature_set(feature_set: str) -> str:
     feature_set = str(feature_set).lower()
-    if feature_set not in {"basic", "reliability", "rf-reliability"}:
+    if feature_set != "wl-zf-reliability":
         raise ValueError(f"Unsupported SD feature set: {feature_set}")
     return feature_set
 
 
-def sd_feature_dim(feature_set: str, sd_kind: str) -> int:
-    feature_set = validate_sd_feature_set(feature_set)
-    sd_kind = str(sd_kind).lower()
-    if feature_set == "rf-reliability":
-        return 17
-    if feature_set == "reliability":
-        return 11
-    if sd_kind == "fc":
-        return 2
-    if sd_kind == "bilstm":
-        return 6
-    raise ValueError(f"Unsupported SD kind: {sd_kind}")
-
-
 def infer_sd_feature_set(feature_dim: int, sd_kind: str, fallback: str) -> str:
-    feature_dim = int(feature_dim)
-    sd_kind = str(sd_kind).lower()
-    if feature_dim == sd_feature_dim("rf-reliability", sd_kind):
-        return "rf-reliability"
-    if feature_dim == sd_feature_dim("reliability", sd_kind):
-        return "reliability"
-    if feature_dim == sd_feature_dim("basic", sd_kind):
-        return "basic"
-    return validate_sd_feature_set(fallback)
+    del feature_dim, sd_kind, fallback
+    return "wl-zf-reliability"
 
 
 def normalized_log_feature(values: np.ndarray, floor: float, lo: float, hi: float, scale: float) -> np.ndarray:
@@ -1440,162 +1290,46 @@ def make_sd_features(
     eps: float,
 ) -> np.ndarray:
     feature_set = validate_sd_feature_set(feature_set)
-    sd_kind = str(sd_kind).lower()
+    del sd_kind
     y_d = np.asarray(y_d, dtype=np.complex64)
     a_hat = np.asarray(a_hat, dtype=np.complex64)
     n_frames, n_fft, n_users, n_rx = y_d.shape
-    n_streams = a_hat.shape[-1]
+
+    ab_wl = as_wl_channel(a_hat, cfg, ce_target)
+    a_wl, b_wl = split_wl_channel(ab_wl)
+    n_streams = a_wl.shape[-1]
     if n_users > n_streams:
-        raise RuntimeError("SD features assume one target stream per user")
-
-    zf_info = linear_detect_with_gain(y_d, a_hat, noise_power, method="zf", eps=eps)
-    if zf_info is None:
-        raise RuntimeError(f"{sd_kind.upper()}-SD requires n_streams <= n_rx_per_ue for ZF features")
-    zf_estimates, _ = zf_info
-    zf_target = target_user_streams(zf_estimates)
-
-    if feature_set == "basic" and sd_kind == "fc":
-        return np.stack([zf_target.real, zf_target.imag], axis=-1).astype(np.float32)
-
-    mmse_info = linear_detect_with_gain(y_d, a_hat, noise_power, method="mmse", eps=eps)
-    if mmse_info is None:
-        raise RuntimeError("MMSE estimates are required for SD reliability features")
-    mmse_estimates, mmse_gain = mmse_info
-    mmse_target = target_user_streams(mmse_estimates)
-
-    snr_norm = (np.asarray(snr_db, dtype=np.float32) / 40.0).astype(np.float32)
-
-    if feature_set == "basic":
-        noise_log = np.log10(np.maximum(np.asarray(noise_power, dtype=np.float32), 1e-30)).astype(np.float32)
-        return np.stack(
-            [
-                zf_target.real,
-                zf_target.imag,
-                mmse_target.real,
-                mmse_target.imag,
-                frame_feature(noise_log, n_users, n_fft),
-                frame_feature(snr_norm, n_users, n_fft),
-            ],
-            axis=-1,
-        ).astype(np.float32)
-
-    noise_log = normalized_log_feature(noise_power, 1e-12, -12.0, 2.0, 12.0)
-    noise_grid = frame_feature(noise_log, n_users, n_fft)
-    snr_grid = frame_feature(snr_norm, n_users, n_fft)
-    reconstructed = np.matmul(a_hat, mmse_estimates[..., None])[..., 0]
+        raise RuntimeError("WL-ZF SD features assume one target stream per user")
+    wl_zf_estimates = wl_detect(y_d, ab_wl, noise_power, method="zf", eps=eps)
+    if wl_zf_estimates is None:
+        raise RuntimeError("WL-ZF SD features require n_streams <= n_rx_per_ue")
+    wl_zf_target = target_user_streams(wl_zf_estimates)
+    reconstructed = wl_reconstruct_y(ab_wl, wl_zf_estimates)
     residual = y_d - reconstructed
-    h_target = np.stack([a_hat[:, :, user_id, :, user_id] for user_id in range(n_users)], axis=2)
+    h_target = np.stack([a_wl[:, :, user_id, :, user_id] for user_id in range(n_users)], axis=2)
+    b_target = np.stack([b_wl[:, :, user_id, :, user_id] for user_id in range(n_users)], axis=2)
+    channel_power = np.sum(np.abs(h_target) ** 2 + np.abs(b_target) ** 2, axis=-1)
     residual_matched = np.sum(np.conj(h_target) * residual, axis=-1)
-    residual_denom = np.sum(np.abs(h_target) ** 2, axis=-1)
-    residual_matched = residual_matched / np.maximum(residual_denom, float(eps))
+    residual_matched = residual_matched / np.maximum(channel_power, float(eps))
     residual_matched = np.transpose(residual_matched, (0, 2, 1))
     residual_power = np.transpose(np.mean(np.abs(residual) ** 2, axis=-1), (0, 2, 1))
     log_res_power = normalized_log_feature(residual_power, 1e-12, -12.0, 2.0, 12.0)
-    gain_mag = np.abs(target_user_streams(mmse_gain)).astype(np.float32)
-    log_cond = condition_feature(cond_a, n_frames, n_users, n_fft)
-
-    if feature_set == "rf-reliability":
-        a_wl = channel_for_wl_features(a_hat, cfg, ce_target)
-        wl_estimates = rf_iq_wl_detect(
-            y_d,
-            a_wl,
-            noise_power,
-            cfg,
-            method="mmse",
-            eps=eps,
-        )
-        if wl_estimates is None:
-            raise RuntimeError("RF-reliability features require RF-aware WL-MMSE estimates")
-        wl_target = target_user_streams(wl_estimates)
-        wl_delta = (wl_target - mmse_target).astype(np.complex64)
-        wl_delta_power = np.abs(wl_delta) ** 2
-        log_wl_delta_power = normalized_log_feature(wl_delta_power, 1e-12, -12.0, 2.0, 12.0)
-        wl_error_proxy = np.abs(wl_delta).astype(np.float32)
-
-        return np.stack(
-            [
-                zf_target.real,
-                zf_target.imag,
-                mmse_target.real,
-                mmse_target.imag,
-                wl_target.real,
-                wl_target.imag,
-                residual_matched.real,
-                residual_matched.imag,
-                wl_delta.real,
-                wl_delta.imag,
-                log_res_power,
-                log_wl_delta_power,
-                gain_mag,
-                wl_error_proxy,
-                log_cond,
-                noise_grid,
-                snr_grid,
-            ],
-            axis=-1,
-        ).astype(np.float32)
-
+    log_gain_power = normalized_log_feature(np.transpose(channel_power, (0, 2, 1)), 1e-12, -12.0, 2.0, 12.0)
+    snr_norm = (np.asarray(snr_db, dtype=np.float32) / 40.0).astype(np.float32)
+    noise_log = normalized_log_feature(noise_power, 1e-12, -12.0, 2.0, 12.0)
     return np.stack(
         [
-            zf_target.real,
-            zf_target.imag,
-            mmse_target.real,
-            mmse_target.imag,
+            wl_zf_target.real,
+            wl_zf_target.imag,
             residual_matched.real,
             residual_matched.imag,
             log_res_power,
-            gain_mag,
-            log_cond,
-            noise_grid,
-            snr_grid,
+            log_gain_power,
+            condition_feature(cond_a, n_frames, n_users, n_fft),
+            frame_feature(noise_log, n_users, n_fft),
+            frame_feature(snr_norm, n_users, n_fft),
         ],
         axis=-1,
-    ).astype(np.float32)
-
-
-def make_fc_sd_arrays(
-    *,
-    cfg: dict[str, Any],
-    y_d: np.ndarray,
-    a_hat: np.ndarray,
-    bits: np.ndarray,
-    noise_power: np.ndarray,
-    snr_db: np.ndarray,
-    cond_a: np.ndarray,
-    group_size: int,
-    feature_set: str,
-    ce_target: str,
-    eps: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    n_frames, n_streams, n_fft, bps = bits.shape
-    if n_fft % group_size != 0:
-        raise ValueError("n_fft must be divisible by group_size")
-    features = make_sd_features(
-        cfg=cfg,
-        y_d=y_d,
-        a_hat=a_hat,
-        noise_power=noise_power,
-        snr_db=snr_db,
-        cond_a=cond_a,
-        feature_set=feature_set,
-        sd_kind="fc",
-        ce_target=ce_target,
-        eps=eps,
-    )
-    feature_dim = features.shape[-1]
-    if features.shape[:3] != (n_frames, n_streams, n_fft):
-        raise ValueError(f"Expected SD feature shape {(n_frames, n_streams, n_fft)}, got {features.shape[:3]}")
-    n_groups = n_fft // group_size
-    x_groups = features.reshape(n_frames, n_streams, n_groups, group_size, feature_dim)
-    y = bits.reshape(n_frames, n_streams, n_groups, group_size, bps).reshape(
-        n_frames,
-        n_streams,
-        n_groups,
-        group_size * bps,
-    )
-    return x_groups.reshape(n_frames * n_streams * n_groups, group_size * feature_dim), y.reshape(
-        n_frames * n_streams * n_groups,
-        group_size * bps,
     ).astype(np.float32)
 
 
@@ -1628,172 +1362,16 @@ def make_bilstm_sd_arrays(
         ce_target=ce_target,
         eps=eps,
     )
-    feature_dim = features.shape[-1]
     if features.shape[:3] != (n_frames, n_streams, n_fft):
         raise ValueError(f"Expected SD feature shape {(n_frames, n_streams, n_fft)}, got {features.shape[:3]}")
     n_groups = n_fft // group_size
+    x = features.reshape(n_frames * n_streams, n_fft, features.shape[-1])
     y = bits.reshape(n_frames, n_streams, n_groups, group_size, bps).reshape(
-        n_frames,
-        n_streams,
-        n_groups,
-        group_size * bps,
-    )
-    return features.reshape(n_frames * n_streams, n_fft, feature_dim), y.reshape(
         n_frames * n_streams,
         n_groups,
         group_size * bps,
-    ).astype(np.float32)
-
-
-def train_fc_sd(
-    *,
-    cfg: dict[str, Any],
-    train_data: dict[str, np.ndarray],
-    val_data: dict[str, np.ndarray],
-    ce_model: MuMimoCEModel,
-    lmmse_weight: dict[str, Any] | np.ndarray,
-    args: argparse.Namespace,
-    device: torch.device,
-    checkpoint_path: Path,
-) -> MuMimoFCSDNet:
-    group_size = int(args.group_size)
-    bps = bits_per_symbol(str(cfg["modulation"]))
-    feature_set = validate_sd_feature_set(str(args.sd_feature_set))
-    a_train = predict_ce(
-        ce_model,
-        train_data["a_ls"],
-        lmmse_weight=lmmse_weight,
-        snr_db=train_data["snr_db"],
-        device=device,
-        batch_size=int(args.batch_size),
     )
-    a_val = predict_ce(
-        ce_model,
-        val_data["a_ls"],
-        lmmse_weight=lmmse_weight,
-        snr_db=val_data["snr_db"],
-        device=device,
-        batch_size=int(args.batch_size),
-    )
-    x_train, y_train = make_fc_sd_arrays(
-        cfg=cfg,
-        y_d=train_data["y_d"],
-        a_hat=a_train,
-        bits=train_data["bits"],
-        noise_power=train_data["noise_power"],
-        snr_db=train_data["snr_db"],
-        cond_a=train_data["cond_A"],
-        group_size=group_size,
-        feature_set=feature_set,
-        ce_target=str(args.ce_target),
-        eps=float(args.eps),
-    )
-    x_val_np, y_val_np = make_fc_sd_arrays(
-        cfg=cfg,
-        y_d=val_data["y_d"],
-        a_hat=a_val,
-        bits=val_data["bits"],
-        noise_power=val_data["noise_power"],
-        snr_db=val_data["snr_db"],
-        cond_a=val_data["cond_A"],
-        group_size=group_size,
-        feature_set=feature_set,
-        ce_target=str(args.ce_target),
-        eps=float(args.eps),
-    )
-
-    feature_dim = x_train.shape[1] // group_size
-    model = MuMimoFCSDNet(
-        group_size,
-        bps,
-        int(args.hidden_dim),
-        feature_dim=feature_dim,
-        sd_feature_set=feature_set,
-    ).to(device)
-    train_ds = TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train))
-    generator = torch.Generator()
-    generator.manual_seed(int(args.seed) + 17)
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=int(args.batch_size),
-        shuffle=True,
-        generator=generator,
-    )
-    x_val = torch.from_numpy(x_val_np).to(device)
-    y_val = torch.from_numpy(y_val_np).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=float(args.sd_lr))
-    scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer,
-        step_size=max(1, int(args.sd_lr_step)),
-        gamma=float(args.sd_lr_gamma),
-    )
-
-    history: list[dict[str, float]] = []
-    for epoch in range(1, int(args.sd_epochs) + 1):
-        model.train()
-        loss_sum = 0.0
-        n_seen = 0
-        for xb, yb in train_loader:
-            xb = xb.to(device)
-            yb = yb.to(device)
-            optimizer.zero_grad(set_to_none=True)
-            logits = model(xb)
-            loss = sd_loss_value(logits, yb, str(args.sd_loss))
-            loss.backward()
-            optimizer.step()
-            loss_sum += float(loss.item()) * xb.shape[0]
-            n_seen += xb.shape[0]
-        scheduler.step()
-
-        model.eval()
-        with torch.no_grad():
-            val_logits = model(x_val)
-            val_loss = float(sd_loss_value(val_logits, y_val, str(args.sd_loss)).item())
-            val_bits = (torch.sigmoid(val_logits) > 0.5).float()
-            val_ber = float(torch.mean((val_bits != y_val).float()).item())
-        train_loss = loss_sum / max(n_seen, 1)
-        row = {
-            "epoch": float(epoch),
-            "train_loss": float(train_loss),
-            "val_loss": float(val_loss),
-            "val_ber": float(val_ber),
-            "lr": float(optimizer.param_groups[0]["lr"]),
-        }
-        history.append(row)
-        if should_log(epoch, int(args.sd_epochs), int(args.log_every)):
-            print(
-                f"[FC-SD {epoch:04d}] train_loss={train_loss:.6e}, "
-                f"val_loss={val_loss:.6e}, val_BER={val_ber:.4e}, "
-                f"lr={optimizer.param_groups[0]['lr']:.3e}"
-            )
-
-    write_history(
-        Path(args.result_dir) / "train_history_fc_sd.csv",
-        history,
-        ["epoch", "train_loss", "val_loss", "val_ber", "lr"],
-    )
-    save_training_plot(
-        Path(args.result_dir) / "fc_sd_training_curve.png",
-        history,
-        title="MU-MIMO FC-SD Training",
-        include_ber=True,
-    )
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "group_size": group_size,
-            "bits_per_symbol": bps,
-            "hidden_dim": int(args.hidden_dim),
-            "feature_dim": int(model.feature_dim),
-            "sd_feature_set": str(model.sd_feature_set),
-            "modulation": str(cfg["modulation"]),
-            "sd_loss": str(args.sd_loss),
-        },
-        checkpoint_path,
-    )
-    print(f"[SAVE] {checkpoint_path}")
-    return model
+    return x.astype(np.float32), y.astype(np.float32)
 
 
 def train_bilstm_sd(
@@ -1807,9 +1385,8 @@ def train_bilstm_sd(
     device: torch.device,
     checkpoint_path: Path,
 ) -> MuMimoBiLSTMSDNet:
-    n_fft = int(cfg["n_fft"])
-    bps = bits_per_symbol(str(cfg["modulation"]))
     group_size = int(args.group_size)
+    bps = bits_per_symbol(str(cfg["modulation"]))
     feature_set = validate_sd_feature_set(str(args.sd_feature_set))
     a_train = predict_ce(
         ce_model,
@@ -1854,13 +1431,13 @@ def train_bilstm_sd(
         eps=float(args.eps),
     )
 
-    bilstm_hidden_dims = tuple(int(x) for x in args.bilstm_hidden_dims)
-    feature_dim = int(x_train.shape[-1])
+    feature_dim = x_train.shape[-1]
+    hidden_dims = tuple(int(x) for x in args.bilstm_hidden_dims)
     model = MuMimoBiLSTMSDNet(
-        n_fft,
+        int(cfg["n_fft"]),
         bps,
         group_size,
-        bilstm_hidden_dims,
+        hidden_dims=hidden_dims,
         feature_dim=feature_dim,
         sd_feature_set=feature_set,
     ).to(device)
@@ -1876,17 +1453,19 @@ def train_bilstm_sd(
     x_val = torch.from_numpy(x_val_np).to(device)
     y_val = torch.from_numpy(y_val_np).to(device)
     lr = float(args.bilstm_lr) if args.bilstm_lr is not None else float(args.sd_lr)
-    n_epochs = int(args.bilstm_epochs) if args.bilstm_epochs is not None else int(args.sd_epochs)
-    lr_step = int(args.bilstm_lr_step) if args.bilstm_lr_step is not None else int(args.sd_lr_step)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer,
-        step_size=max(1, lr_step),
+        step_size=max(1, int(args.bilstm_lr_step)),
         gamma=float(args.sd_lr_gamma),
     )
 
     history: list[dict[str, float]] = []
-    for epoch in range(1, n_epochs + 1):
+    best_val_ber = math.inf
+    best_val_loss = math.inf
+    best_epoch = 0
+    best_state: dict[str, torch.Tensor] | None = None
+    for epoch in range(1, int(args.bilstm_epochs) + 1):
         model.train()
         loss_sum = 0.0
         n_seen = 0
@@ -1909,15 +1488,22 @@ def train_bilstm_sd(
             val_bits = (torch.sigmoid(val_logits) > 0.5).float()
             val_ber = float(torch.mean((val_bits != y_val).float()).item())
         train_loss = loss_sum / max(n_seen, 1)
+        is_best = val_ber < best_val_ber
+        if is_best:
+            best_val_ber = val_ber
+            best_val_loss = val_loss
+            best_epoch = epoch
+            best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
         row = {
             "epoch": float(epoch),
             "train_loss": float(train_loss),
             "val_loss": float(val_loss),
             "val_ber": float(val_ber),
+            "best": float(is_best),
             "lr": float(optimizer.param_groups[0]["lr"]),
         }
         history.append(row)
-        if should_log(epoch, n_epochs, int(args.log_every)):
+        if should_log(epoch, int(args.bilstm_epochs), int(args.log_every)):
             print(
                 f"[BiLSTM-SD {epoch:04d}] train_loss={train_loss:.6e}, "
                 f"val_loss={val_loss:.6e}, val_BER={val_ber:.4e}, "
@@ -1927,7 +1513,7 @@ def train_bilstm_sd(
     write_history(
         Path(args.result_dir) / "train_history_bilstm_sd.csv",
         history,
-        ["epoch", "train_loss", "val_loss", "val_ber", "lr"],
+        ["epoch", "train_loss", "val_loss", "val_ber", "best", "lr"],
     )
     save_training_plot(
         Path(args.result_dir) / "bilstm_sd_training_curve.png",
@@ -1936,67 +1522,37 @@ def train_bilstm_sd(
         include_ber=True,
     )
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    if best_state is None:
+        best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+    model.load_state_dict(best_state)
     torch.save(
         {
-            "state_dict": model.state_dict(),
-            "n_fft": n_fft,
+            "state_dict": best_state,
+            "n_fft": int(cfg["n_fft"]),
             "group_size": group_size,
             "bits_per_symbol": bps,
-            "hidden_dims": list(model.hidden_dims),
+            "hidden_dims": hidden_dims,
             "feature_dim": int(model.feature_dim),
             "sd_feature_set": str(model.sd_feature_set),
             "modulation": str(cfg["modulation"]),
             "sd_loss": str(args.sd_loss),
+            "sd_reference": "wl-zf",
+            "proposed_detector": "wl-zf-bilstm",
+            "best_epoch": int(best_epoch),
+            "best_val_loss": float(best_val_loss),
+            "best_val_ber": float(best_val_ber),
         },
         checkpoint_path,
     )
-    print(f"[SAVE] {checkpoint_path}")
-    return model
-
-
-def infer_fc_feature_dim(state_dict: dict[str, torch.Tensor], group_size: int) -> int:
-    input_dim = int(state_dict["net.0.weight"].shape[1])
-    if input_dim % int(group_size) != 0:
-        raise ValueError(f"FC-SD input dim {input_dim} is not divisible by group_size={group_size}")
-    return input_dim // int(group_size)
-
-
-def load_fc_sd_model(
-    path: Path,
-    cfg: dict[str, Any],
-    group_size: int,
-    device: torch.device,
-    args_feature_set: str,
-) -> MuMimoFCSDNet:
-    checkpoint = torch.load(path, map_location=device, weights_only=False)
-    model_group_size = int(checkpoint.get("group_size", group_size))
-    bps = int(checkpoint.get("bits_per_symbol", bits_per_symbol(str(cfg["modulation"]))))
-    hidden_dim = int(checkpoint.get("hidden_dim", 256))
-    feature_dim = int(checkpoint.get("feature_dim", infer_fc_feature_dim(checkpoint["state_dict"], model_group_size)))
-    feature_set = str(checkpoint.get("sd_feature_set", infer_sd_feature_set(feature_dim, "fc", args_feature_set)))
-    model = MuMimoFCSDNet(
-        model_group_size,
-        bps,
-        hidden_dim,
-        feature_dim=feature_dim,
-        sd_feature_set=feature_set,
-    ).to(device)
-    model.load_state_dict(checkpoint["state_dict"])
-    model.eval()
-    print(f"[LOAD] FC-SD checkpoint: {path} (feature_set={feature_set}, feature_dim={feature_dim})")
+    print(f"[SAVE] {checkpoint_path} (best_epoch={best_epoch}, best_val_BER={best_val_ber:.4e})")
     return model
 
 
 def infer_bilstm_hidden_dims(state_dict: dict[str, torch.Tensor]) -> tuple[int, int, int]:
-    try:
-        h1 = int(state_dict["lstm1.weight_ih_l0"].shape[0] // 4)
-        h2 = int(state_dict["lstm2.weight_ih_l0"].shape[0] // 4)
-        h3 = int(state_dict["lstm3.weight_ih_l0"].shape[0] // 4)
-        if min(h1, h2, h3) > 0:
-            return h1, h2, h3
-    except KeyError:
-        pass
-    return 64, 32, 16
+    h1 = int(state_dict["lstm1.weight_ih_l0"].shape[0] // 4)
+    h2 = int(state_dict["lstm2.weight_ih_l0"].shape[0] // 4)
+    h3 = int(state_dict["lstm3.weight_ih_l0"].shape[0] // 4)
+    return h1, h2, h3
 
 
 def infer_bilstm_feature_dim(state_dict: dict[str, torch.Tensor]) -> int:
@@ -2011,78 +1567,28 @@ def load_bilstm_sd_model(
     args_feature_set: str,
 ) -> MuMimoBiLSTMSDNet:
     checkpoint = torch.load(path, map_location=device, weights_only=False)
+    state_dict = checkpoint["state_dict"]
+    model_group_size = int(checkpoint.get("group_size", group_size))
     n_fft = int(checkpoint.get("n_fft", cfg["n_fft"]))
     bps = int(checkpoint.get("bits_per_symbol", bits_per_symbol(str(cfg["modulation"]))))
-    model_group_size = int(checkpoint.get("group_size", group_size))
-    hidden_dims = tuple(
-        int(x)
-        for x in checkpoint.get(
-            "hidden_dims",
-            infer_bilstm_hidden_dims(checkpoint["state_dict"]),
-        )
-    )
-    feature_dim = int(checkpoint.get("feature_dim", infer_bilstm_feature_dim(checkpoint["state_dict"])))
+    hidden_dims = tuple(int(x) for x in checkpoint.get("hidden_dims", infer_bilstm_hidden_dims(state_dict)))
+    feature_dim = int(checkpoint.get("feature_dim", infer_bilstm_feature_dim(state_dict)))
     feature_set = str(checkpoint.get("sd_feature_set", infer_sd_feature_set(feature_dim, "bilstm", args_feature_set)))
     model = MuMimoBiLSTMSDNet(
         n_fft,
         bps,
         model_group_size,
-        hidden_dims,
+        hidden_dims=hidden_dims,
         feature_dim=feature_dim,
         sd_feature_set=feature_set,
     ).to(device)
-    model.load_state_dict(checkpoint["state_dict"])
+    model.load_state_dict(state_dict)
     model.eval()
-    print(f"[LOAD] BiLSTM-SD checkpoint: {path} (feature_set={feature_set}, feature_dim={feature_dim})")
+    print(
+        f"[LOAD] BiLSTM-SD checkpoint: {path} "
+        f"(feature_set={feature_set}, feature_dim={feature_dim}, hidden_dims={hidden_dims})"
+    )
     return model
-
-
-def predict_fc_sd_bits(
-    model: MuMimoFCSDNet,
-    *,
-    cfg: dict[str, Any],
-    y_d: np.ndarray,
-    a_hat: np.ndarray,
-    noise_power: np.ndarray,
-    snr_db: np.ndarray,
-    cond_a: np.ndarray,
-    true_bits_shape: tuple[int, int, int, int],
-    group_size: int,
-    ce_target: str,
-    eps: float,
-    device: torch.device,
-    batch_size: int,
-) -> np.ndarray:
-    dummy_bits = np.zeros(true_bits_shape, dtype=np.int8)
-    x_np, _ = make_fc_sd_arrays(
-        cfg=cfg,
-        y_d=y_d,
-        a_hat=a_hat,
-        bits=dummy_bits,
-        noise_power=noise_power,
-        snr_db=snr_db,
-        cond_a=cond_a,
-        group_size=group_size,
-        feature_set=str(model.sd_feature_set),
-        ce_target=ce_target,
-        eps=eps,
-    )
-    loader = DataLoader(TensorDataset(torch.from_numpy(x_np)), batch_size=int(batch_size), shuffle=False)
-    chunks: list[np.ndarray] = []
-    model.eval()
-    with torch.no_grad():
-        for (xb,) in loader:
-            prob = torch.sigmoid(model(xb.to(device))).cpu().numpy()
-            chunks.append((prob > 0.5).astype(np.int8))
-    pred_flat = np.concatenate(chunks, axis=0)
-    n_frames, n_streams, n_fft, bps = true_bits_shape
-    n_groups = n_fft // group_size
-    return pred_flat.reshape(n_frames, n_streams, n_groups, group_size, bps).reshape(
-        n_frames,
-        n_streams,
-        n_fft,
-        bps,
-    )
 
 
 def predict_bilstm_sd_bits(
@@ -2133,6 +1639,40 @@ def predict_bilstm_sd_bits(
     )
 
 
+def predict_ce(
+    model: MuMimoCEModel,
+    a_ls: np.ndarray,
+    *,
+    lmmse_weight: dict[str, Any] | np.ndarray | None,
+    snr_db: np.ndarray,
+    device: torch.device,
+    batch_size: int,
+) -> np.ndarray:
+    del lmmse_weight, snr_db
+    x_np = ce_complex_to_ri(a_ls)
+    loader = DataLoader(TensorDataset(torch.from_numpy(x_np)), batch_size=int(batch_size), shuffle=False)
+    chunks: list[np.ndarray] = []
+    model.eval()
+    with torch.no_grad():
+        for (xb,) in loader:
+            chunks.append(model(xb.to(device)).cpu().numpy())
+    pred_np = np.concatenate(chunks, axis=0)
+    a_shape = np.asarray(a_ls).shape
+    if len(a_shape) != 5:
+        raise ValueError(f"Expected CE channel shape (frames, fft, users, rx, streams), got {a_shape}")
+    n_frames, n_fft, n_users, n_rx, n_streams = a_shape
+    expected_rows = n_frames * n_users
+    expected_half = n_fft * n_rx * n_streams
+    expected_dim = 2 * expected_half
+    if pred_np.shape != (expected_rows, expected_dim):
+        raise ValueError(f"CE output shape {pred_np.shape} does not match channel shape {a_shape}")
+
+    real = pred_np[:, :expected_half].reshape(n_frames, n_users, n_fft, n_rx, n_streams)
+    imag = pred_np[:, expected_half:].reshape(n_frames, n_users, n_fft, n_rx, n_streams)
+    pred_complex = real + 1j * imag
+    return np.transpose(pred_complex, (0, 2, 1, 3, 4)).astype(np.complex64)
+
+
 def format_ber(value: float | None) -> str:
     if value is None:
         return "n/a"
@@ -2169,42 +1709,51 @@ def split_diagnostics(data: dict[str, np.ndarray]) -> dict[str, float]:
     }
 
 
-def evaluate_one(
+def evaluate_one_wl(
     *,
     path: Path,
     cfg: dict[str, Any],
-    ce_model: MuMimoCEModel,
-    fc_model: MuMimoFCSDNet | None,
+    data: dict[str, np.ndarray],
+    a_lmmse: np.ndarray,
+    a_plain_lmmse: np.ndarray,
+    a_comnet: np.ndarray,
     bilstm_model: MuMimoBiLSTMSDNet | None,
-    lmmse_weight: dict[str, Any] | np.ndarray,
     args: argparse.Namespace,
     device: torch.device,
+    snr: float,
+    modulation: str,
+    bits: np.ndarray,
+    lmmse_weight: dict[str, Any] | np.ndarray,
 ) -> dict[str, Any]:
-    data = preprocess_split(load_npz(path), cfg, float(args.eps), str(args.ce_target))
-    snr = float(np.mean(data["snr_db"]))
-    modulation = str(cfg["modulation"])
-    bits = data["bits"]
-    a_lmmse = apply_lmmse_weight(data["a_ls"], lmmse_weight, data["snr_db"])
-    a_comnet = predict_ce(
-        ce_model,
-        data["a_ls"],
-        lmmse_weight=lmmse_weight,
-        snr_db=data["snr_db"],
-        device=device,
-        batch_size=int(args.batch_size),
-    )
-
-    ls_zf_ber, _ = detector_ber(
-        data["y_d"],
-        data["a_ls"],
-        data["noise_power"],
-        bits,
-        modulation,
-        method="zf",
-        eps=float(args.eps),
-    )
     ls_mmse_ber, _ = detector_ber(
         data["y_d"],
+        data["a_plain_ls"],
+        data["noise_power"],
+        bits,
+        modulation,
+        method="mmse",
+        eps=float(args.eps),
+    )
+    plain_lmmse_mmse_ber, _ = detector_ber(
+        data["y_d"],
+        a_plain_lmmse,
+        data["noise_power"],
+        bits,
+        modulation,
+        method="mmse",
+        eps=float(args.eps),
+    )
+    wl_ls_zf_ber, _ = wl_detector_ber(
+        data["y_d"],
+        data["a_ls"],
+        data["noise_power"],
+        bits,
+        modulation,
+        method="zf",
+        eps=float(args.eps),
+    )
+    wl_ls_mmse_ber, _ = wl_detector_ber(
+        data["y_d"],
         data["a_ls"],
         data["noise_power"],
         bits,
@@ -2212,16 +1761,7 @@ def evaluate_one(
         method="mmse",
         eps=float(args.eps),
     )
-    lmmse_zf_ber, _ = detector_ber(
-        data["y_d"],
-        a_lmmse,
-        data["noise_power"],
-        bits,
-        modulation,
-        method="zf",
-        eps=float(args.eps),
-    )
-    lmmse_mmse_ber, _ = detector_ber(
+    wl_lmmse_mmse_ber, _ = wl_detector_ber(
         data["y_d"],
         a_lmmse,
         data["noise_power"],
@@ -2230,75 +1770,25 @@ def evaluate_one(
         method="mmse",
         eps=float(args.eps),
     )
-    comnet_zf_ber, _ = detector_ber(
+    true_wl_mmse_ber, _ = wl_detector_ber(
         data["y_d"],
-        a_comnet,
-        data["noise_power"],
-        bits,
-        modulation,
-        method="zf",
-        eps=float(args.eps),
-    )
-    true_zf_ber, _ = detector_ber(
-        data["y_d"],
-        data["a_true"],
-        data["noise_power"],
-        bits,
-        modulation,
-        method="zf",
-        eps=float(args.eps),
-    )
-    true_mmse_ber, _ = detector_ber(
-        data["y_d"],
-        data["a_true"],
+        data["a_wl_true"],
         data["noise_power"],
         bits,
         modulation,
         method="mmse",
         eps=float(args.eps),
     )
-    true_wl_mmse_ber, _ = rf_iq_wl_detector_ber(
-        data["y_d"],
-        data["a_true"],
-        data["noise_power"],
-        bits,
-        modulation,
-        cfg,
-        method="mmse",
-        eps=float(args.eps),
-    )
-    mrc_symbols = desired_only_mrc(data["y_d"], data["a_ls"], float(args.eps))
-    mrc_ber = ber_for_user_grid(mrc_symbols, bits, modulation)
 
     ber: dict[str, float | None] = {
-        "LS-ZF": ls_zf_ber,
         "LS-MMSE": ls_mmse_ber,
-        "LMMSE-ZF": lmmse_zf_ber,
-        "LMMSE-MMSE": lmmse_mmse_ber,
-        "ComNet-CE-ZF-Hard": comnet_zf_ber,
-        "Pre-RF True-H ZF": true_zf_ber,
-        "Pre-RF True-H MMSE": true_mmse_ber,
-        "RF-aware True-H WL-MMSE": true_wl_mmse_ber,
-        "Desired-only MRC": mrc_ber,
+        "LMMSE-MMSE": plain_lmmse_mmse_ber,
+        "WL-LS -> WL-ZF": wl_ls_zf_ber,
+        "WL-LS -> WL-MMSE": wl_ls_mmse_ber,
+        "WL-LMMSE -> WL-MMSE": wl_lmmse_mmse_ber,
+        "True WL-H -> WL-MMSE": true_wl_mmse_ber,
     }
 
-    if fc_model is not None:
-        pred_fc = predict_fc_sd_bits(
-            fc_model,
-            cfg=cfg,
-            y_d=data["y_d"],
-            a_hat=a_comnet,
-            noise_power=data["noise_power"],
-            snr_db=data["snr_db"],
-            cond_a=data["cond_A"],
-            true_bits_shape=bits.shape,
-            group_size=int(args.group_size),
-            ce_target=str(args.ce_target),
-            eps=float(args.eps),
-            device=device,
-            batch_size=int(args.batch_size),
-        )
-        ber["ComNet-FC"] = bit_error_rate(pred_fc, bits)
     if bilstm_model is not None:
         pred_bilstm = predict_bilstm_sd_bits(
             bilstm_model,
@@ -2309,13 +1799,13 @@ def evaluate_one(
             snr_db=data["snr_db"],
             cond_a=data["cond_A"],
             true_bits_shape=bits.shape,
-            group_size=int(args.group_size),
+            group_size=int(bilstm_model.group_size),
             ce_target=str(args.ce_target),
             eps=float(args.eps),
             device=device,
             batch_size=int(args.batch_size),
         )
-        ber["ComNet-BiLSTM"] = bit_error_rate(pred_bilstm, bits)
+        ber["WL-CE -> WL-ZF-BiLSTM"] = bit_error_rate(pred_bilstm, bits)
 
     total_bit_count = int(bits.size)
     bit_errors = {
@@ -2327,35 +1817,32 @@ def evaluate_one(
         for key, value in ber.items()
     }
     a_mse = {
-        "LS": channel_mse(data["a_ls"], data["a_ce_target"]),
-        "LMMSE": channel_mse(a_lmmse, data["a_ce_target"]),
-        "ComNet-CE": channel_mse(a_comnet, data["a_ce_target"]),
+        "WL-LS": channel_mse(data["a_ls"], data["a_ce_target"]),
+        "WL-LMMSE": channel_mse(a_lmmse, data["a_ce_target"]),
+        "WL-CE": channel_mse(a_comnet, data["a_ce_target"]),
     }
     a_nmse = {
-        "LS": channel_nmse(data["a_ls"], data["a_ce_target"]),
-        "LMMSE": channel_nmse(a_lmmse, data["a_ce_target"]),
-        "ComNet-CE": channel_nmse(a_comnet, data["a_ce_target"]),
+        "WL-LS": channel_nmse(data["a_ls"], data["a_ce_target"]),
+        "WL-LMMSE": channel_nmse(a_lmmse, data["a_ce_target"]),
+        "WL-CE": channel_nmse(a_comnet, data["a_ce_target"]),
     }
     diagnostics = split_diagnostics(data)
+    sd_parts = []
+    if "WL-CE -> WL-ZF-BiLSTM" in ber:
+        sd_parts.append(f"CE-BiLSTM={format_ber(ber['WL-CE -> WL-ZF-BiLSTM'])}")
+    sd_piece = f"{', '.join(sd_parts)}, " if sd_parts else ""
     print(
         f"[EVAL] {path.name} SNR={snr:g} "
-        f"LS-ZF={format_ber(ber['LS-ZF'])}, "
         f"LS-MMSE={format_ber(ber['LS-MMSE'])}, "
-        f"LMMSE-ZF={format_ber(ber['LMMSE-ZF'])}, "
         f"LMMSE-MMSE={format_ber(ber['LMMSE-MMSE'])}, "
-        f"ComNet-CE-ZF-Hard={format_ber(ber['ComNet-CE-ZF-Hard'])}, "
-        + (f"ComNet-FC={format_ber(ber['ComNet-FC'])}, " if "ComNet-FC" in ber else "")
-        + (f"ComNet-BiLSTM={format_ber(ber['ComNet-BiLSTM'])}, " if "ComNet-BiLSTM" in ber else "")
-        + f"Pre-RF True-H ZF={format_ber(ber['Pre-RF True-H ZF'])}, "
-        f"Pre-RF True-H MMSE={format_ber(ber['Pre-RF True-H MMSE'])}, "
-        f"RF-aware True-H WL-MMSE={format_ber(ber['RF-aware True-H WL-MMSE'])}, "
-        f"Desired-MRC={format_ber(ber['Desired-only MRC'])}, "
-        f"A_MSE_LS={to_db(a_mse['LS']):.2f}dB, "
-        f"A_MSE_LMMSE={to_db(a_mse['LMMSE']):.2f}dB, "
-        f"A_MSE_ComNet={to_db(a_mse['ComNet-CE']):.2f}dB, "
-        f"int/des={diagnostics['interference_to_desired_ratio_db']:.2f}dB, "
-        f"eff_sinr_mean={diagnostics['effective_sinr_db_mean']:.2f}dB, "
-        f"mean_cond={diagnostics['cond_A_mean']:.2f}, p95_cond={diagnostics['cond_A_p95']:.2f}"
+        f"WL-LS->WL-ZF={format_ber(ber['WL-LS -> WL-ZF'])}, "
+        f"WL-LS->WL-MMSE={format_ber(ber['WL-LS -> WL-MMSE'])}, "
+        f"WL-LMMSE->WL-MMSE={format_ber(ber['WL-LMMSE -> WL-MMSE'])}, "
+        f"{sd_piece}"
+        f"True-WL-H={format_ber(ber['True WL-H -> WL-MMSE'])}, "
+        f"WL_NMSE_LS={to_db(a_nmse['WL-LS']):.2f}dB, "
+        f"WL_NMSE_LMMSE={to_db(a_nmse['WL-LMMSE']):.2f}dB, "
+        f"WL_NMSE_CE={to_db(a_nmse['WL-CE']):.2f}dB"
     )
     return {
         "snr": snr,
@@ -2363,6 +1850,13 @@ def evaluate_one(
         "ce_target_resolved": resolve_ce_target_mode(str(args.ce_target), cfg),
         "lmmse_mode": lmmse_estimator_mode(lmmse_weight),
         "lmmse_snr_bins_db": lmmse_snr_bins(lmmse_weight),
+        "channel_representation": "augmented_wl_ab",
+        "ce_init_resolved": "wl-lmmse",
+        "wl_lmmse_fit_split": "train",
+        "sd_reference": "wl-zf",
+        "proposed_detector": "wl-zf-bilstm",
+        "proposed_sd_models": ["bilstm"] if bilstm_model is not None else [],
+        "baseline_detector": "wl-mmse",
         "a_mse": a_mse,
         "a_mse_db": {key: to_db(value) for key, value in a_mse.items()},
         "a_nmse": a_nmse,
@@ -2378,6 +1872,55 @@ def evaluate_one(
     }
 
 
+def evaluate_one(
+    *,
+    path: Path,
+    cfg: dict[str, Any],
+    ce_model: MuMimoCEModel,
+    bilstm_model: MuMimoBiLSTMSDNet | None,
+    lmmse_weight: dict[str, Any] | np.ndarray,
+    plain_lmmse_weight: dict[str, Any] | np.ndarray | None,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> dict[str, Any]:
+    data = preprocess_split(load_npz(path), cfg, float(args.eps), str(args.ce_target))
+    snr = float(np.mean(data["snr_db"]))
+    modulation = str(cfg["modulation"])
+    bits = data["bits"]
+    a_lmmse = apply_lmmse_weight(data["a_ls"], lmmse_weight, data["snr_db"])
+    a_plain_lmmse = (
+        apply_lmmse_weight(data["a_plain_ls"], plain_lmmse_weight, data["snr_db"])
+        if plain_lmmse_weight is not None
+        else a_lmmse
+    )
+    a_comnet = predict_ce(
+        ce_model,
+        data["a_ls"],
+        lmmse_weight=lmmse_weight,
+        snr_db=data["snr_db"],
+        device=device,
+        batch_size=int(args.batch_size),
+    )
+
+    if not is_wl_ce_target(str(args.ce_target), cfg):
+        raise ValueError("This receiver has been trimmed to the WL-RF ComNet path; use --ce-target wl-rf/auto with RF impairment.")
+    return evaluate_one_wl(
+        path=path,
+        cfg=cfg,
+        data=data,
+        a_lmmse=a_lmmse,
+        a_plain_lmmse=a_plain_lmmse,
+        a_comnet=a_comnet,
+        bilstm_model=bilstm_model,
+        args=args,
+        device=device,
+        snr=snr,
+        modulation=modulation,
+        bits=bits,
+        lmmse_weight=lmmse_weight,
+    )
+
+
 def save_eval_summary(result_dir: Path, cfg: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "config": cfg,
@@ -2387,6 +1930,13 @@ def save_eval_summary(result_dir: Path, cfg: dict[str, Any], results: list[dict[
             "lmmse_mode": results[0].get("lmmse_mode") if results else None,
             "lmmse_snr_bins_db": results[0].get("lmmse_snr_bins_db") if results else [],
             "channel_mse_reference": "a_ce_target",
+            "channel_representation": results[0].get("channel_representation") if results else None,
+            "ce_init_resolved": results[0].get("ce_init_resolved") if results else None,
+            "wl_lmmse_fit_split": results[0].get("wl_lmmse_fit_split") if results else None,
+            "sd_reference": results[0].get("sd_reference") if results else None,
+            "proposed_detector": results[0].get("proposed_detector") if results else None,
+            "proposed_sd_models": results[0].get("proposed_sd_models") if results else [],
+            "baseline_detector": results[0].get("baseline_detector") if results else None,
         },
         "a_mse_db": {},
         "a_nmse_db": {},
@@ -2452,17 +2002,13 @@ def save_eval_plots(result_dir: Path, summary: dict[str, Any]) -> None:
     ber_names = ordered_metric_names(
         all_ber_names,
         [
-            "LS-ZF",
             "LS-MMSE",
-            "LMMSE-ZF",
             "LMMSE-MMSE",
-            "ComNet-CE-ZF-Hard",
-            "ComNet-FC",
-            "ComNet-BiLSTM",
-            "Pre-RF True-H ZF",
-            "Pre-RF True-H MMSE",
-            "RF-aware True-H WL-MMSE",
-            "Desired-only MRC",
+            "WL-LS -> WL-ZF",
+            "WL-LS -> WL-MMSE",
+            "WL-LMMSE -> WL-MMSE",
+            "WL-CE -> WL-ZF-BiLSTM",
+            "True WL-H -> WL-MMSE",
         ],
     )
     plt.figure(figsize=(8, 5))
@@ -2494,7 +2040,7 @@ def save_eval_plots(result_dir: Path, summary: dict[str, Any]) -> None:
     print(f"[SAVE] {ber_path}")
 
     all_mse_names = {key for item in summary["a_mse_db"].values() for key in item.keys()}
-    mse_names = ordered_metric_names(all_mse_names, ["LS", "LMMSE", "ComNet-CE"])
+    mse_names = ordered_metric_names(all_mse_names, ["WL-LS", "WL-LMMSE", "WL-CE"])
     plt.figure(figsize=(8, 5))
     for name in mse_names:
         values = [summary["a_mse_db"][f"{snr:g}"][name] for snr in snrs]
@@ -2516,9 +2062,9 @@ def evaluate_all(
     dataset_dir: Path,
     cfg: dict[str, Any],
     ce_model: MuMimoCEModel,
-    fc_model: MuMimoFCSDNet | None,
     bilstm_model: MuMimoBiLSTMSDNet | None,
     lmmse_weight: dict[str, Any] | np.ndarray,
+    plain_lmmse_weight: dict[str, Any] | np.ndarray | None,
     args: argparse.Namespace,
     device: torch.device,
 ) -> dict[str, Any]:
@@ -2530,9 +2076,9 @@ def evaluate_all(
             path=path,
             cfg=cfg,
             ce_model=ce_model,
-            fc_model=fc_model,
             bilstm_model=bilstm_model,
             lmmse_weight=lmmse_weight,
+            plain_lmmse_weight=plain_lmmse_weight,
             args=args,
             device=device,
         )
@@ -2551,18 +2097,23 @@ def main() -> int:
     dataset_dir = Path(args.dataset_dir)
     result_dir = Path(args.result_dir)
     result_dir.mkdir(parents=True, exist_ok=True)
-    ce_checkpoint = Path(args.ce_checkpoint) if args.ce_checkpoint else result_dir / "mumimo_ce_refinenet.pt"
-    fc_checkpoint = Path(args.fc_checkpoint) if args.fc_checkpoint else result_dir / "mumimo_refinenet_fc.pt"
-    bilstm_checkpoint = (
-        Path(args.bilstm_checkpoint) if args.bilstm_checkpoint else result_dir / "mumimo_refinenet_bilstm.pt"
-    )
+    ce_checkpoint = Path(args.ce_checkpoint) if args.ce_checkpoint else result_dir / "mumimo_ce_linear.pt"
+    legacy_ce_checkpoint = result_dir / "mumimo_ce_refinenet.pt"
+    bilstm_checkpoint = Path(args.bilstm_checkpoint) if args.bilstm_checkpoint else result_dir / "mumimo_wl_zf_bilstm.pt"
+    legacy_bilstm_checkpoint = result_dir / "mumimo_wl_zf_refinenet_bilstm.pt"
     lmmse_checkpoint = (
         Path(args.lmmse_checkpoint) if args.lmmse_checkpoint else result_dir / "mumimo_lmmse_estimator.npz"
     )
+    plain_lmmse_checkpoint = result_dir / "mumimo_plain_lmmse_estimator.npz"
     cfg = load_config(dataset_dir)
     if str(cfg.get("waveform_type")) != "raw_mumimo_e2e":
         raise ValueError(
             f"Expected raw_mumimo_e2e dataset, got waveform_type={cfg.get('waveform_type')!r}"
+        )
+    if not is_wl_ce_target(str(args.ce_target), cfg):
+        raise ValueError(
+            "This receiver has been trimmed to the WL-RF ComNet path; use an RF-impaired dataset "
+            "with --ce-target auto or pass --ce-target wl-rf explicitly."
         )
     device = resolve_device(str(args.device))
     n_users = int(cfg["n_users"])
@@ -2573,7 +2124,8 @@ def main() -> int:
         f"[CONFIG] modulation={cfg['modulation']}, n_fft={cfg['n_fft']}, "
         f"n_users={n_users}, n_streams={n_streams}, n_rx_per_ue={n_rx_per_ue}, "
         f"group_size={args.group_size}, ce_type={args.ce_type}, sd_type={args.sd_type}, "
-        f"sd_feature_set={args.sd_feature_set}, lmmse_mode={args.lmmse_mode}"
+        f"sd_feature_set={args.sd_feature_set}, ce_target_resolved={resolve_ce_target_mode(str(args.ce_target), cfg)}, "
+        f"lmmse_mode={args.lmmse_mode}"
     )
     if n_streams > n_rx_per_ue:
         print("[WARN] n_streams > n_rx_per_ue, ZF baselines and SD ZF features will be disabled.")
@@ -2583,10 +2135,22 @@ def main() -> int:
         cfg=cfg,
         args=args,
         checkpoint_path=lmmse_checkpoint,
+        label="WL-LMMSE" if is_wl_ce_target(str(args.ce_target), cfg) else "LMMSE",
+    )
+    plain_lmmse_weight = (
+        get_lmmse_weight(
+            dataset_dir=dataset_dir,
+            cfg=cfg,
+            args=args,
+            checkpoint_path=plain_lmmse_checkpoint,
+            ce_target_override="rf-linear",
+            label="plain LMMSE",
+        )
+        if is_wl_ce_target(str(args.ce_target), cfg)
+        else lmmse_weight
     )
 
     ce_model: MuMimoCEModel | None = None
-    fc_model: MuMimoFCSDNet | None = None
     bilstm_model: MuMimoBiLSTMSDNet | None = None
 
     if args.mode in {"train-all", "train-ce"}:
@@ -2594,6 +2158,8 @@ def main() -> int:
         val_path = find_one(dataset_dir, "val_snr*.npz")
         train_data = preprocess_split(load_npz(train_path), cfg, float(args.eps), str(args.ce_target))
         val_data = preprocess_split(load_npz(val_path), cfg, float(args.eps), str(args.ce_target))
+        train_data = filter_split_by_snr(train_data, TRAIN_ONLY_SNR_DB)
+        val_data = filter_split_by_snr(val_data, TRAIN_ONLY_SNR_DB)
         ce_model = train_ce(
             cfg=cfg,
             train_data=train_data,
@@ -2605,6 +2171,8 @@ def main() -> int:
         )
 
     if args.mode in {"train-sd", "eval"}:
+        if args.ce_checkpoint is None and not ce_checkpoint.exists() and legacy_ce_checkpoint.exists():
+            ce_checkpoint = legacy_ce_checkpoint
         if not ce_checkpoint.exists():
             raise FileNotFoundError(f"CE checkpoint not found: {ce_checkpoint}")
         ce_model = load_ce_model(ce_checkpoint, cfg, device)
@@ -2616,41 +2184,23 @@ def main() -> int:
         val_path = find_one(dataset_dir, "val_snr*.npz")
         train_data = preprocess_split(load_npz(train_path), cfg, float(args.eps), str(args.ce_target))
         val_data = preprocess_split(load_npz(val_path), cfg, float(args.eps), str(args.ce_target))
-        if args.sd_type in {"fc", "both"}:
-            fc_model = train_fc_sd(
-                cfg=cfg,
-                train_data=train_data,
-                val_data=val_data,
-                ce_model=ce_model,
-                lmmse_weight=lmmse_weight,
-                args=args,
-                device=device,
-                checkpoint_path=fc_checkpoint,
-            )
-        if args.sd_type in {"bilstm", "both"}:
-            bilstm_model = train_bilstm_sd(
-                cfg=cfg,
-                train_data=train_data,
-                val_data=val_data,
-                ce_model=ce_model,
-                lmmse_weight=lmmse_weight,
-                args=args,
-                device=device,
-                checkpoint_path=bilstm_checkpoint,
-            )
+        train_data = filter_split_by_snr(train_data, TRAIN_ONLY_SNR_DB)
+        val_data = filter_split_by_snr(val_data, TRAIN_ONLY_SNR_DB)
+        bilstm_model = train_bilstm_sd(
+            cfg=cfg,
+            train_data=train_data,
+            val_data=val_data,
+            ce_model=ce_model,
+            lmmse_weight=lmmse_weight,
+            args=args,
+            device=device,
+            checkpoint_path=bilstm_checkpoint,
+        )
 
     if args.mode == "eval":
-        if args.sd_type in {"fc", "both"} and fc_checkpoint.exists():
-            fc_model = load_fc_sd_model(
-                fc_checkpoint,
-                cfg,
-                int(args.group_size),
-                device,
-                str(args.sd_feature_set),
-            )
-        elif args.sd_type in {"fc", "both"}:
-            print(f"[WARN] FC-SD checkpoint not found, ComNet-FC will be skipped: {fc_checkpoint}")
-        if args.sd_type in {"bilstm", "both"} and bilstm_checkpoint.exists():
+        if args.bilstm_checkpoint is None and not bilstm_checkpoint.exists() and legacy_bilstm_checkpoint.exists():
+            bilstm_checkpoint = legacy_bilstm_checkpoint
+        if bilstm_checkpoint.exists():
             bilstm_model = load_bilstm_sd_model(
                 bilstm_checkpoint,
                 cfg,
@@ -2658,8 +2208,11 @@ def main() -> int:
                 device,
                 str(args.sd_feature_set),
             )
-        elif args.sd_type in {"bilstm", "both"}:
-            print(f"[WARN] BiLSTM-SD checkpoint not found, ComNet-BiLSTM will be skipped: {bilstm_checkpoint}")
+        else:
+            print(
+                f"[WARN] WL-ZF BiLSTM checkpoint not found, BiLSTM-SD result will be skipped: "
+                f"{bilstm_checkpoint}"
+            )
 
     if ce_model is None:
         raise RuntimeError("CE model is required for evaluation")
@@ -2668,9 +2221,9 @@ def main() -> int:
         dataset_dir=dataset_dir,
         cfg=cfg,
         ce_model=ce_model,
-        fc_model=fc_model,
         bilstm_model=bilstm_model,
         lmmse_weight=lmmse_weight,
+        plain_lmmse_weight=plain_lmmse_weight,
         args=args,
         device=device,
     )

@@ -4,3 +4,9 @@ __pycache__
 *.zip
 outputs*
 # results*
+agents.*
+logs*
+*.log
+*.npy
+*.npz
+*.csv

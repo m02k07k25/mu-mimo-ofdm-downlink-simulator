@@ -1,151 +1,128 @@
-# MU-MIMO OFDM ComNet
+# MU-MIMO OFDM WL-ComNet Simulator
 
-raw UE antenna-domain MU-MIMO OFDM downlink dataset을 생성하고, classical receiver와 ComNet 계열 receiver를 비교하는 프로젝트입니다.
-
-```text
-TX: tx_mumimo_e2e_dataset.py
-RX: rx_mumimo_receiver.py
-PHY modules: mumimo_phy/
-```
-
-## Project Flow
+이 저장소는 raw UE antenna-domain MU-MIMO OFDM downlink dataset을 만들고,
+CSIT error, clipping, receiver I/Q imbalance 조건에서 WL-aware ComNet
+receiver를 학습/평가하는 코드입니다.
 
 ```text
-TX dataset generation
--> raw pilot/data OFDM waveform 저장
--> RX에서 LS/LMMSE/ComNet-CE channel estimate 생성
--> ZF/MMSE/RF-aware WL-MMSE/ComNet-SD로 bit 검출
--> BER, channel MSE/NMSE, diagnostic CSV/plot 저장
+TX dataset generator: tx_mumimo_e2e_dataset.py
+RX receiver trainer:  rx_mumimo_receiver.py
+PHY helper package:   mumimo_phy/
 ```
 
-현재 clean sanity에서는 QAM bit ordering, stream/user indexing, FFT/IFFT normalization, CP 제거 위치, pilot indexing, MMSE gain compensation 쪽의 큰 오류 가능성은 낮습니다.
+## 현재 Receiver 구조
 
-## Main Dataset
-
-현재 main dataset:
+현재 receiver는 receiver I/Q imbalance가 있는 경우를 기준으로
+widely-linear (WL) chain에 맞춰져 있습니다.
 
 ```text
-outputs_mumimo_e2e_64qam_csit001_clip20_rfsmall_train10000
+Pilots -> WL-LS channel estimate
+WL-LS -> linear CE layer initialized by train-split WL-LMMSE -> WL-CE
+Data + WL-CE -> WL-ZF features -> BiLSTM SD -> predicted bits
 ```
 
-설정:
+핵심 기준은 다음과 같습니다.
+
+- CE 입력은 항상 `WL-LS`입니다.
+- CE target은 augmented WL channel `(A, B)`입니다.
+- CE는 single linear layer이고, training split에서 fit한 empirical
+  `WL-LMMSE` weight로 초기화합니다.
+- SD는 BiLSTM만 사용합니다. FC-SD는 현재 active flow에 포함하지 않습니다.
+- `WL-MMSE`는 proposed detector가 아니라 comparison baseline입니다.
+
+## 최종 실험 세트
+
+아래 명령어들은 공통으로 다음 설정을 사용합니다.
 
 ```text
 modulation = 64QAM
 n_users = 2
-n_streams = 2
 n_tx = 8
 n_rx_per_ue = 4
 n_fft = 64
 n_cp = 16
-n_taps = 7
-n_rays_per_path = 15
-channel_model = SCM-style clustered multipath
 csit_error_var = 0.001
-case = clipping
-clip_ratio = 2.0
-pilot_kind = qpsk
-rx_iq_gain_imbalance_db = 0.2
-rx_iq_phase_error_deg = 1.0
-rx_common_phase_error_deg = 1.0
-n_train_frames = 10000
-n_val_frames = 2000
-n_test_frames_per_snr = 2000
-train_snr_db_list = 15 20 25 30 35 40
-test_snr_db = 0 5 10 15 20 25 30 35 40
+train/val SNR = 40 dB
+test SNR sweep = 0, 5, ..., 40 dB
+train/val/test frames = 50000 / 10000 / 10000 per SNR
 ```
 
-## Generate Dataset
-
-TX 데이터는 이미 만들어져 있으면 다시 생성할 필요가 없습니다.
+### 1. Linear, No I/Q Impairment
 
 ```powershell
-C:\Users\m02k0\anaconda3\envs\incheon_traffic_gpu\python.exe tx_mumimo_e2e_dataset.py --out-dir outputs_mumimo_e2e_64qam_csit001_clip20_rfsmall_train10000 --modulation 64QAM --case clipping --clip-ratio 2.0 --csit-error-var 0.001 --rx-iq-gain-imbalance-db 0.2 --rx-iq-phase-error-deg 1.0 --rx-common-phase-error-deg 1.0 --n-train-frames 10000 --n-val-frames 2000 --n-test-frames-per-snr 2000
+python tx_mumimo_e2e_dataset.py --out-dir datasets/linear_noiq --case linear --rx-iq-gain-imbalance-db 0 --rx-iq-phase-error-deg 0 --rx-common-phase-error-deg 0
 ```
-
-## Train/Evaluate RX
-
-현재 권장 RX 설정:
 
 ```powershell
-C:\Users\m02k0\anaconda3\envs\incheon_traffic_gpu\python.exe rx_mumimo_receiver.py --dataset-dir outputs_mumimo_e2e_64qam_csit001_clip20_rfsmall_train10000 --result-dir results_mumimo_e2e_64qam_csit001_clip20_rfsmall_train10000_blend_ce_rf_reliability_snr_lmmse --mode train-all --sd-type bilstm --sd-feature-set rf-reliability --ce-type blend-resmlp --ce-target auto --lmmse-mode snr-binned --bilstm-epochs 300 --device cuda
+python rx_mumimo_receiver.py --dataset-dir datasets/linear_noiq --result-dir results/linear_noiq --mode train-all --device cuda
 ```
 
-핵심 RX 옵션:
+### 2. Clipping 3.0, I/Q 0.5 dB, Phase 2 deg, CPE 3 deg
 
-```text
-CE type = blend-resmlp
-CE target = auto -> RF on이면 rf-linear
-SD feature = rf-reliability
-LMMSE mode = snr-binned
+```powershell
+python tx_mumimo_e2e_dataset.py --out-dir datasets/clip30_iq05_p2_cpe3 --case clipping --clip-ratio 3.0 --rx-iq-gain-imbalance-db 0.5 --rx-iq-phase-error-deg 2 --rx-common-phase-error-deg 3
 ```
 
-`snr-binned` LMMSE는 train SNR별로 empirical LMMSE weight를 따로 fit합니다. test SNR이 train bin에 없으면 가장 가까운 train SNR bin을 사용합니다.
-
-## Latest Result
-
-최신 full run:
-
-```text
-results_mumimo_e2e_64qam_csit001_clip20_rfsmall_train10000_blend_ce_rf_reliability_snr_lmmse
+```powershell
+python rx_mumimo_receiver.py --dataset-dir datasets/clip30_iq05_p2_cpe3 --result-dir results/clip30_iq05_p2_cpe3 --mode train-all --device cuda
 ```
 
-40 dB:
+### 3. Clipping 1.7, I/Q 0.5 dB, Phase 2 deg, CPE 3 deg
 
-```text
-LS-MMSE                  2.654e-3
-LMMSE-MMSE               3.033e-3
-ComNet-CE-ZF-Hard        2.543e-3
-ComNet-BiLSTM            2.503e-3
-RF-aware True-H WL-MMSE  1.426e-3
+```powershell
+python tx_mumimo_e2e_dataset.py --out-dir datasets/clip17_iq05_p2_cpe3 --case clipping --clip-ratio 1.7 --rx-iq-gain-imbalance-db 0.5 --rx-iq-phase-error-deg 2 --rx-common-phase-error-deg 3
 ```
 
-해석:
-
-- ComNet-BiLSTM은 25 dB 이상에서 LS-MMSE보다 좋습니다.
-- SNR-binned LMMSE는 global LMMSE보다 high-SNR channel MSE와 LMMSE BER을 개선했습니다.
-- 그래도 high SNR BER 기준 LMMSE-MMSE가 LS-MMSE를 완전히 이기지는 못합니다. channel MSE와 최종 BER 최적점이 다르고 RF/clipping mismatch가 남아 있기 때문입니다.
-- RF-aware True-H WL-MMSE oracle과는 아직 gap이 있으므로 다음 단계는 correction-based SD입니다.
-
-자세한 수치는 [실험결과.md](./실험결과.md)를 보세요.
-
-## Output Metrics
-
-RX 결과에는 다음 값이 저장됩니다.
-
-```text
-BER per method
-bit_errors / total_bits
-channel MSE/NMSE
-desired_power_mean
-inter_stream_power_mean
-interference_to_desired_ratio_db
-effective_sinr_db_mean
-effective_sinr_db_p10
-cond_A_mean
-cond_A_p95
-noise_power_mean
+```powershell
+python rx_mumimo_receiver.py --dataset-dir datasets/clip17_iq05_p2_cpe3 --result-dir results/clip17_iq05_p2_cpe3 --mode train-all --device cuda
 ```
 
-생성 파일:
+## 평가 지표
+
+RX script는 result directory 아래에 `eval_summary.json`, CSV, plot을 저장합니다.
+주요 BER curve는 다음과 같습니다.
 
 ```text
+LS-MMSE
+LMMSE-MMSE
+WL-LS -> WL-ZF
+WL-LS -> WL-MMSE
+WL-LMMSE -> WL-MMSE
+WL-CE -> WL-ZF-BiLSTM
+True WL-H -> WL-MMSE
+```
+
+Channel estimation 품질은 WL true target `(A, B)` 기준으로 다음 항목을
+MSE/NMSE로 기록합니다.
+
+```text
+WL-LS
+WL-LMMSE
+WL-CE
+```
+
+`True WL-H -> WL-MMSE`는 true-channel linear WL reference입니다. Clipping까지
+최적으로 보상하는 nonlinear upper bound는 아닙니다.
+
+## 주요 출력 파일
+
+```text
+config.json
+train_snr40.npz
+val_snr40.npz
+test_snr00.npz ... test_snr40.npz
 eval_summary.json
-ber_vs_snr.png
-a_mse_vs_snr.png
-ber_vs_snr.csv
-channel_mse_vs_snr.csv
-channel_nmse_vs_snr.csv
+ber_vs_snr.csv / ber_vs_snr.png
+channel_mse_vs_snr.csv / channel_nmse_vs_snr.csv
 diagnostic_vs_snr.csv
-train_history_ce.csv
-train_history_bilstm_sd.csv
+train_history_ce.csv / ce_training_curve.png
+train_history_bilstm_sd.csv / bilstm_sd_training_curve.png
 ```
 
-## Documents
+## 문서
 
 ```text
-README_tx_mumimo_comnet_dataset.md   TX dataset 상세 설명
-README_mumimo_e2e_receiver.md        RX receiver 상세 설명
-실험결과.md                          최신 실험 결과와 해석
-TODO.md                              현재 문제와 다음 작업
+TX_README.md          Dataset generation 설명
+RX_README.md          Receiver, CE/SD, metric 설명
+mumimo_phy/README.md  공통 PHY helper package 설명
 ```

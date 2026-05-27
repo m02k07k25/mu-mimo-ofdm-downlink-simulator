@@ -1,0 +1,79 @@
+{
+  "n_fft": 64,
+  "n_cp": 16,
+  "modulation": "64QAM",
+  "n_users": 2,
+  "n_tx": 8,
+  "n_rx_per_ue": 4,
+  "n_taps": 7,
+  "n_rays_per_path": 15,
+  "pdp_decay": 5.0,
+  "carrier_freq_hz": 800000000.0,
+  "antenna_spacing_lambda": 0.5,
+  "scm_angle_spread_deg": 3.0,
+  "snr_train_db": 40.0,
+  "snr_train_db_list": [
+    40.0
+  ],
+  "snr_test_db": [
+    0,
+    5,
+    10,
+    15,
+    20,
+    25,
+    30,
+    35,
+    40
+  ],
+  "n_train_frames": 50000,
+  "n_val_frames": 10000,
+  "n_test_frames_per_snr": 10000,
+  "csit_error_var": 0.001,
+  "precoder_norm": "column",
+  "case": "clipping",
+  "clip_ratio": 1.7,
+  "pilot_kind": "qpsk",
+  "rx_iq_gain_imbalance_db": 0.5,
+  "rx_iq_phase_error_deg": 2.0,
+  "rx_common_phase_error_deg": 3.0,
+  "seed": 7,
+  "n_streams": 2,
+  "waveform_type": "raw_mumimo_e2e",
+  "channel_model": "SCM-style geometric clustered channel",
+  "pilot_design": "orthogonal_stream_slots_qpsk",
+  "power_policy": "hybrid steering + digital ZF, total precoder norm=column",
+  "nonlinear_processing": "BS per-antenna time-domain OFDM symbol is clipped before cyclic prefix insertion",
+  "symbol_power": "E[|s_u|^2] = 1 for QAM data and active pilots",
+  "precoder": "MATLAB-style analog steering beams from the strongest SCM path, followed by per-subcarrier digital ZF on Wr.T @ H_tx_est @ Wt",
+  "extra_arrays": [
+    "W_tx_analog",
+    "W_rx_analog",
+    "W_digital",
+    "scm_selected_angles",
+    "scm_center_angles"
+  ],
+  "noise_power": "complex per-antenna variance sigma2; generated as sqrt(sigma2/2)*(n_re+j*n_im)",
+  "snr_definition": "sigma2 = mean(|raw received data waveform before AWGN|^2) / 10^(snr_db/10)",
+  "rf_impairments": {
+    "location": "receiver front-end, after multipath channel and before AWGN",
+    "enabled": true,
+    "rx_iq_gain_imbalance_db": 0.5,
+    "rx_iq_phase_error_deg": 2.0,
+    "rx_common_phase_error_deg": 3.0,
+    "widely_linear_model": "y_rf = alpha * y_channel + beta * conj(y_channel)",
+    "alpha": {
+      "real": 0.9978603287600952,
+      "imag": 0.06927357477527533
+    },
+    "beta": {
+      "real": 0.02815503785371934,
+      "imag": 0.018453473919856717
+    },
+    "default_policy": "enabled by default for RF stress testing; use the True WL-H -> WL-MMSE receiver metric as a true-channel linear reference",
+    "mild_stress_test_example": "0.5 dB I/Q gain imbalance, 3 degree I/Q phase error, 5 degree common phase rotation",
+    "nonzero_warning": "I/Q imbalance is a widely-linear RF impairment. With nonzero RF impairment, A_eff_true remains the pre-RF linear effective channel, so plain True-H and LMMSE channel-estimation baselines are no longer true-channel references."
+  },
+  "test_snr_policy": "paired base frames: test_snr*.npz files share the same channel, bits, precoder, clean data waveform, and clean pilot waveform per frame; only AWGN scale changes by SNR",
+  "receiver_compatibility": "raw UE antenna-domain waveform; use rx_mumimo_receiver.py"
+}
