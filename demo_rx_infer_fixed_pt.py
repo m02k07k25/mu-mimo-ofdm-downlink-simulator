@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import subprocess
 import shutil
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
 RX_SCRIPT = ROOT / "rx_mumimo_receiver.py"
-PYTHON_EXE = Path("C:/Python313/python.exe")
 
 FIXED_MODEL_DIR = ROOT / "datasets" / "clip17_iq05_p2_cpe3"
 FIXED_RESULT_DIR = ROOT / "results" / "clip17_iq05_p2_cpe3"
@@ -21,7 +22,21 @@ LMMSE_CHECKPOINT = FIXED_RESULT_DIR / "mumimo_lmmse_estimator.npz"
 PLAIN_LMMSE_CHECKPOINT = FIXED_RESULT_DIR / "mumimo_plain_lmmse_estimator.npz"
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run fixed-condition demo inference with trained checkpoints."
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="Torch device passed to rx_mumimo_receiver.py. Default: auto.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     required_paths = (
         FIXED_MODEL_DIR,
         CE_CHECKPOINT,
@@ -37,9 +52,8 @@ def main() -> None:
     DEFAULT_RESULT_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copy2(PLAIN_LMMSE_CHECKPOINT, DEFAULT_RESULT_DIR / PLAIN_LMMSE_CHECKPOINT.name)
 
-    python_cmd = [str(PYTHON_EXE)] if PYTHON_EXE.exists() else ["py", "-3.13"]
     cmd = [
-        *python_cmd,
+        sys.executable,
         str(RX_SCRIPT),
         "--dataset-dir",
         str(DEFAULT_DATASET_DIR),
@@ -48,7 +62,7 @@ def main() -> None:
         "--mode",
         "eval",
         "--device",
-        "cuda",
+        str(args.device),
         "--ce-checkpoint",
         str(CE_CHECKPOINT),
         "--bilstm-checkpoint",
