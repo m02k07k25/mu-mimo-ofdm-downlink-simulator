@@ -1,0 +1,581 @@
+{
+  "config": {
+    "n_fft": 64,
+    "n_cp": 16,
+    "modulation": "64QAM",
+    "n_users": 2,
+    "n_tx": 8,
+    "n_rx_per_ue": 4,
+    "n_taps": 7,
+    "n_rays_per_path": 15,
+    "pdp_decay": 5.0,
+    "carrier_freq_hz": 800000000.0,
+    "antenna_spacing_lambda": 0.5,
+    "scm_angle_spread_deg": 3.0,
+    "snr_train_db": 40.0,
+    "snr_train_db_list": [
+      40.0
+    ],
+    "snr_test_db": [
+      0,
+      5,
+      10,
+      15,
+      20,
+      25,
+      30,
+      35,
+      40
+    ],
+    "n_train_frames": 0,
+    "n_val_frames": 0,
+    "n_test_frames_per_snr": 1000,
+    "csit_error_var": 0.001,
+    "precoder_norm": "column",
+    "case": "clipping",
+    "clip_ratio": 1.7,
+    "pilot_kind": "qpsk",
+    "rx_iq_gain_imbalance_db": 0.5,
+    "rx_iq_phase_error_deg": 2.0,
+    "rx_common_phase_error_deg": 3.0,
+    "seed": 7,
+    "n_streams": 2,
+    "waveform_type": "raw_mumimo_e2e",
+    "channel_model": "SCM-style geometric clustered channel",
+    "pilot_design": "orthogonal_stream_slots_qpsk",
+    "power_policy": "hybrid steering + digital ZF, total precoder norm=column",
+    "nonlinear_processing": "BS per-antenna time-domain OFDM symbol is clipped before cyclic prefix insertion",
+    "symbol_power": "E[|s_u|^2] = 1 for QAM data and active pilots",
+    "precoder": "MATLAB-style analog steering beams from the strongest SCM path, followed by per-subcarrier digital ZF on Wr.T @ H_tx_est @ Wt",
+    "extra_arrays": [
+      "W_tx_analog",
+      "W_rx_analog",
+      "W_digital",
+      "scm_selected_angles",
+      "scm_center_angles"
+    ],
+    "noise_power": "complex per-antenna variance sigma2; generated as sqrt(sigma2/2)*(n_re+j*n_im)",
+    "snr_definition": "sigma2 = mean(|raw received data waveform before AWGN|^2) / 10^(snr_db/10)",
+    "rf_impairments": {
+      "location": "receiver front-end, after multipath channel and before AWGN",
+      "enabled": true,
+      "rx_iq_gain_imbalance_db": 0.5,
+      "rx_iq_phase_error_deg": 2.0,
+      "rx_common_phase_error_deg": 3.0,
+      "widely_linear_model": "y_rf = alpha * y_channel + beta * conj(y_channel)",
+      "alpha": {
+        "real": 0.9978603287600952,
+        "imag": 0.06927357477527533
+      },
+      "beta": {
+        "real": 0.02815503785371934,
+        "imag": 0.018453473919856717
+      },
+      "default_policy": "enabled by default for RF stress testing; use the True WL-H -> WL-MMSE receiver metric as a true-channel linear reference",
+      "mild_stress_test_example": "0.5 dB I/Q gain imbalance, 3 degree I/Q phase error, 5 degree common phase rotation",
+      "nonzero_warning": "I/Q imbalance is a widely-linear RF impairment. With nonzero RF impairment, A_eff_true remains the pre-RF linear effective channel, so plain True-H and LMMSE channel-estimation baselines are no longer true-channel references."
+    },
+    "test_snr_policy": "paired base frames: test_snr*.npz files share the same channel, bits, precoder, clean data waveform, and clean pilot waveform per frame; only AWGN scale changes by SNR",
+    "receiver_compatibility": "raw UE antenna-domain waveform; use rx_mumimo_receiver.py"
+  },
+  "receiver": {
+    "ce_target": "auto",
+    "ce_target_resolved": "wl-rf",
+    "lmmse_mode": "snr-binned",
+    "lmmse_snr_bins_db": [
+      40.0
+    ],
+    "channel_mse_reference": "a_ce_target",
+    "channel_representation": "augmented_wl_ab",
+    "ce_init_resolved": "wl-lmmse",
+    "wl_lmmse_fit_split": "train",
+    "sd_reference": "wl-zf",
+    "proposed_detector": "wl-zf-bilstm",
+    "proposed_sd_models": [
+      "bilstm"
+    ],
+    "baseline_detector": "wl-mmse"
+  },
+  "a_mse_db": {
+    "0": {
+      "WL-LS": 2.010374789344198,
+      "WL-LMMSE": 0.690017922345928,
+      "WL-CE": 0.6333633656621958
+    },
+    "5": {
+      "WL-LS": -2.972939406008614,
+      "WL-LMMSE": -4.306115872284174,
+      "WL-CE": -4.361783616609928
+    },
+    "10": {
+      "WL-LS": -7.9207672878805155,
+      "WL-LMMSE": -9.292886579390183,
+      "WL-CE": -9.345369259681991
+    },
+    "15": {
+      "WL-LS": -12.760092800296341,
+      "WL-LMMSE": -14.249506492520126,
+      "WL-CE": -14.291941467667893
+    },
+    "20": {
+      "WL-LS": -17.28838521282421,
+      "WL-LMMSE": -19.11199847998228,
+      "WL-CE": -19.123851574304705
+    },
+    "25": {
+      "WL-LS": -21.0653161430426,
+      "WL-LMMSE": -23.698796191173322,
+      "WL-CE": -23.626219344972522
+    },
+    "30": {
+      "WL-LS": -23.571156077112555,
+      "WL-LMMSE": -27.595991747966167,
+      "WL-CE": -27.34058475197877
+    },
+    "35": {
+      "WL-LS": -24.802940282738057,
+      "WL-LMMSE": -30.26097491219781,
+      "WL-CE": -29.75625298002577
+    },
+    "40": {
+      "WL-LS": -25.27872629722701,
+      "WL-LMMSE": -31.60967498817245,
+      "WL-CE": -30.916389620649113
+    }
+  },
+  "a_nmse_db": {
+    "0": {
+      "WL-LS": 2.7001346797453807,
+      "WL-LMMSE": 1.3797778001227867,
+      "WL-CE": 1.3231232788650145
+    },
+    "5": {
+      "WL-LS": -2.2831794301584947,
+      "WL-LMMSE": -3.616355960659085,
+      "WL-CE": -3.6720237444887345
+    },
+    "10": {
+      "WL-LS": -7.231007468440513,
+      "WL-LMMSE": -8.60312676573198,
+      "WL-CE": -8.6556093759025
+    },
+    "15": {
+      "WL-LS": -12.070332798949568,
+      "WL-LMMSE": -13.559746445298115,
+      "WL-CE": -13.602181610305173
+    },
+    "20": {
+      "WL-LS": -16.598625195865143,
+      "WL-LMMSE": -18.422238544927602,
+      "WL-CE": -18.434091816358773
+    },
+    "25": {
+      "WL-LS": -20.375556059181715,
+      "WL-LMMSE": -23.009036273755086,
+      "WL-CE": -22.936459345709714
+    },
+    "30": {
+      "WL-LS": -22.881396333068302,
+      "WL-LMMSE": -26.90623196981564,
+      "WL-CE": -26.650824942406114
+    },
+    "35": {
+      "WL-LS": -24.113180406029908,
+      "WL-LMMSE": -29.571215083467752,
+      "WL-CE": -29.06649301662345
+    },
+    "40": {
+      "WL-LS": -24.588966306626773,
+      "WL-LMMSE": -30.91991506162121,
+      "WL-CE": -30.226629719600577
+    }
+  },
+  "ber": {
+    "0": {
+      "LS-MMSE": 0.379203125,
+      "LMMSE-MMSE": 0.3618671875,
+      "WL-LS -> WL-ZF": 0.38539973958333335,
+      "WL-LS -> WL-MMSE": 0.3795013020833333,
+      "WL-LMMSE -> WL-MMSE": 0.36279557291666664,
+      "True WL-H -> WL-MMSE": 0.2737864583333333,
+      "WL-CE -> WL-ZF-BiLSTM": 0.36305598958333335
+    },
+    "5": {
+      "LS-MMSE": 0.2755625,
+      "LMMSE-MMSE": 0.25498307291666666,
+      "WL-LS -> WL-ZF": 0.28398958333333335,
+      "WL-LS -> WL-MMSE": 0.275578125,
+      "WL-LMMSE -> WL-MMSE": 0.2560924479166667,
+      "True WL-H -> WL-MMSE": 0.17753515625,
+      "WL-CE -> WL-ZF-BiLSTM": 0.25872395833333334
+    },
+    "10": {
+      "LS-MMSE": 0.17268880208333334,
+      "LMMSE-MMSE": 0.15616536458333333,
+      "WL-LS -> WL-ZF": 0.17912630208333333,
+      "WL-LS -> WL-MMSE": 0.17192317708333332,
+      "WL-LMMSE -> WL-MMSE": 0.15624348958333334,
+      "True WL-H -> WL-MMSE": 0.09722135416666666,
+      "WL-CE -> WL-ZF-BiLSTM": 0.1641328125
+    },
+    "15": {
+      "LS-MMSE": 0.09617317708333334,
+      "LMMSE-MMSE": 0.08223177083333333,
+      "WL-LS -> WL-ZF": 0.09850651041666666,
+      "WL-LS -> WL-MMSE": 0.09493359375,
+      "WL-LMMSE -> WL-MMSE": 0.081984375,
+      "True WL-H -> WL-MMSE": 0.04351171875,
+      "WL-CE -> WL-ZF-BiLSTM": 0.09653645833333334
+    },
+    "20": {
+      "LS-MMSE": 0.04915625,
+      "LMMSE-MMSE": 0.03797916666666667,
+      "WL-LS -> WL-ZF": 0.048177083333333336,
+      "WL-LS -> WL-MMSE": 0.04685546875,
+      "WL-LMMSE -> WL-MMSE": 0.036765625,
+      "True WL-H -> WL-MMSE": 0.019162760416666667,
+      "WL-CE -> WL-ZF-BiLSTM": 0.05157552083333333
+    },
+    "25": {
+      "LS-MMSE": 0.027872395833333334,
+      "LMMSE-MMSE": 0.019348958333333333,
+      "WL-LS -> WL-ZF": 0.025584635416666668,
+      "WL-LS -> WL-MMSE": 0.02524609375,
+      "WL-LMMSE -> WL-MMSE": 0.018354166666666668,
+      "True WL-H -> WL-MMSE": 0.011776041666666667,
+      "WL-CE -> WL-ZF-BiLSTM": 0.025389322916666665
+    },
+    "30": {
+      "LS-MMSE": 0.020372395833333334,
+      "LMMSE-MMSE": 0.013731770833333334,
+      "WL-LS -> WL-ZF": 0.01778385416666667,
+      "WL-LS -> WL-MMSE": 0.017725260416666666,
+      "WL-LMMSE -> WL-MMSE": 0.01266796875,
+      "True WL-H -> WL-MMSE": 0.00950390625,
+      "WL-CE -> WL-ZF-BiLSTM": 0.014256510416666666
+    },
+    "35": {
+      "LS-MMSE": 0.01795703125,
+      "LMMSE-MMSE": 0.011962239583333333,
+      "WL-LS -> WL-ZF": 0.0153828125,
+      "WL-LS -> WL-MMSE": 0.015356770833333333,
+      "WL-LMMSE -> WL-MMSE": 0.01098046875,
+      "True WL-H -> WL-MMSE": 0.008807291666666666,
+      "WL-CE -> WL-ZF-BiLSTM": 0.010532552083333334
+    },
+    "40": {
+      "LS-MMSE": 0.017303385416666667,
+      "LMMSE-MMSE": 0.011428385416666667,
+      "WL-LS -> WL-ZF": 0.014614583333333334,
+      "WL-LS -> WL-MMSE": 0.01460546875,
+      "WL-LMMSE -> WL-MMSE": 0.0104296875,
+      "True WL-H -> WL-MMSE": 0.008549479166666667,
+      "WL-CE -> WL-ZF-BiLSTM": 0.009537760416666667
+    }
+  },
+  "bit_errors": {
+    "0": {
+      "LS-MMSE": 291228,
+      "LMMSE-MMSE": 277914,
+      "WL-LS -> WL-ZF": 295987,
+      "WL-LS -> WL-MMSE": 291457,
+      "WL-LMMSE -> WL-MMSE": 278627,
+      "True WL-H -> WL-MMSE": 210268,
+      "WL-CE -> WL-ZF-BiLSTM": 278827
+    },
+    "5": {
+      "LS-MMSE": 211632,
+      "LMMSE-MMSE": 195827,
+      "WL-LS -> WL-ZF": 218104,
+      "WL-LS -> WL-MMSE": 211644,
+      "WL-LMMSE -> WL-MMSE": 196679,
+      "True WL-H -> WL-MMSE": 136347,
+      "WL-CE -> WL-ZF-BiLSTM": 198700
+    },
+    "10": {
+      "LS-MMSE": 132625,
+      "LMMSE-MMSE": 119935,
+      "WL-LS -> WL-ZF": 137569,
+      "WL-LS -> WL-MMSE": 132037,
+      "WL-LMMSE -> WL-MMSE": 119995,
+      "True WL-H -> WL-MMSE": 74666,
+      "WL-CE -> WL-ZF-BiLSTM": 126054
+    },
+    "15": {
+      "LS-MMSE": 73861,
+      "LMMSE-MMSE": 63154,
+      "WL-LS -> WL-ZF": 75653,
+      "WL-LS -> WL-MMSE": 72909,
+      "WL-LMMSE -> WL-MMSE": 62964,
+      "True WL-H -> WL-MMSE": 33417,
+      "WL-CE -> WL-ZF-BiLSTM": 74140
+    },
+    "20": {
+      "LS-MMSE": 37752,
+      "LMMSE-MMSE": 29168,
+      "WL-LS -> WL-ZF": 37000,
+      "WL-LS -> WL-MMSE": 35985,
+      "WL-LMMSE -> WL-MMSE": 28236,
+      "True WL-H -> WL-MMSE": 14717,
+      "WL-CE -> WL-ZF-BiLSTM": 39610
+    },
+    "25": {
+      "LS-MMSE": 21406,
+      "LMMSE-MMSE": 14860,
+      "WL-LS -> WL-ZF": 19649,
+      "WL-LS -> WL-MMSE": 19389,
+      "WL-LMMSE -> WL-MMSE": 14096,
+      "True WL-H -> WL-MMSE": 9044,
+      "WL-CE -> WL-ZF-BiLSTM": 19499
+    },
+    "30": {
+      "LS-MMSE": 15646,
+      "LMMSE-MMSE": 10546,
+      "WL-LS -> WL-ZF": 13658,
+      "WL-LS -> WL-MMSE": 13613,
+      "WL-LMMSE -> WL-MMSE": 9729,
+      "True WL-H -> WL-MMSE": 7299,
+      "WL-CE -> WL-ZF-BiLSTM": 10949
+    },
+    "35": {
+      "LS-MMSE": 13791,
+      "LMMSE-MMSE": 9187,
+      "WL-LS -> WL-ZF": 11814,
+      "WL-LS -> WL-MMSE": 11794,
+      "WL-LMMSE -> WL-MMSE": 8433,
+      "True WL-H -> WL-MMSE": 6764,
+      "WL-CE -> WL-ZF-BiLSTM": 8089
+    },
+    "40": {
+      "LS-MMSE": 13289,
+      "LMMSE-MMSE": 8777,
+      "WL-LS -> WL-ZF": 11224,
+      "WL-LS -> WL-MMSE": 11217,
+      "WL-LMMSE -> WL-MMSE": 8010,
+      "True WL-H -> WL-MMSE": 6566,
+      "WL-CE -> WL-ZF-BiLSTM": 7325
+    }
+  },
+  "total_bits": {
+    "0": {
+      "LS-MMSE": 768000,
+      "LMMSE-MMSE": 768000,
+      "WL-LS -> WL-ZF": 768000,
+      "WL-LS -> WL-MMSE": 768000,
+      "WL-LMMSE -> WL-MMSE": 768000,
+      "True WL-H -> WL-MMSE": 768000,
+      "WL-CE -> WL-ZF-BiLSTM": 768000
+    },
+    "5": {
+      "LS-MMSE": 768000,
+      "LMMSE-MMSE": 768000,
+      "WL-LS -> WL-ZF": 768000,
+      "WL-LS -> WL-MMSE": 768000,
+      "WL-LMMSE -> WL-MMSE": 768000,
+      "True WL-H -> WL-MMSE": 768000,
+      "WL-CE -> WL-ZF-BiLSTM": 768000
+    },
+    "10": {
+      "LS-MMSE": 768000,
+      "LMMSE-MMSE": 768000,
+      "WL-LS -> WL-ZF": 768000,
+      "WL-LS -> WL-MMSE": 768000,
+      "WL-LMMSE -> WL-MMSE": 768000,
+      "True WL-H -> WL-MMSE": 768000,
+      "WL-CE -> WL-ZF-BiLSTM": 768000
+    },
+    "15": {
+      "LS-MMSE": 768000,
+      "LMMSE-MMSE": 768000,
+      "WL-LS -> WL-ZF": 768000,
+      "WL-LS -> WL-MMSE": 768000,
+      "WL-LMMSE -> WL-MMSE": 768000,
+      "True WL-H -> WL-MMSE": 768000,
+      "WL-CE -> WL-ZF-BiLSTM": 768000
+    },
+    "20": {
+      "LS-MMSE": 768000,
+      "LMMSE-MMSE": 768000,
+      "WL-LS -> WL-ZF": 768000,
+      "WL-LS -> WL-MMSE": 768000,
+      "WL-LMMSE -> WL-MMSE": 768000,
+      "True WL-H -> WL-MMSE": 768000,
+      "WL-CE -> WL-ZF-BiLSTM": 768000
+    },
+    "25": {
+      "LS-MMSE": 768000,
+      "LMMSE-MMSE": 768000,
+      "WL-LS -> WL-ZF": 768000,
+      "WL-LS -> WL-MMSE": 768000,
+      "WL-LMMSE -> WL-MMSE": 768000,
+      "True WL-H -> WL-MMSE": 768000,
+      "WL-CE -> WL-ZF-BiLSTM": 768000
+    },
+    "30": {
+      "LS-MMSE": 768000,
+      "LMMSE-MMSE": 768000,
+      "WL-LS -> WL-ZF": 768000,
+      "WL-LS -> WL-MMSE": 768000,
+      "WL-LMMSE -> WL-MMSE": 768000,
+      "True WL-H -> WL-MMSE": 768000,
+      "WL-CE -> WL-ZF-BiLSTM": 768000
+    },
+    "35": {
+      "LS-MMSE": 768000,
+      "LMMSE-MMSE": 768000,
+      "WL-LS -> WL-ZF": 768000,
+      "WL-LS -> WL-MMSE": 768000,
+      "WL-LMMSE -> WL-MMSE": 768000,
+      "True WL-H -> WL-MMSE": 768000,
+      "WL-CE -> WL-ZF-BiLSTM": 768000
+    },
+    "40": {
+      "LS-MMSE": 768000,
+      "LMMSE-MMSE": 768000,
+      "WL-LS -> WL-ZF": 768000,
+      "WL-LS -> WL-MMSE": 768000,
+      "WL-LMMSE -> WL-MMSE": 768000,
+      "True WL-H -> WL-MMSE": 768000,
+      "WL-CE -> WL-ZF-BiLSTM": 768000
+    }
+  },
+  "diagnostic": {
+    "0": {
+      "desired_power_mean": 2.879105567932129,
+      "inter_stream_power_mean": 0.5284161567687988,
+      "interference_to_desired_ratio": 0.1835348320167104,
+      "interference_to_desired_ratio_db": -7.362815013459868,
+      "effective_sinr_db_mean": -1.4581345319747925,
+      "effective_sinr_db_p10": -4.24623441696167,
+      "cond_A_mean": 4.705543041229248,
+      "cond_A_p95": 12.34366226196289,
+      "noise_power_mean": 3.1651620864868164
+    },
+    "5": {
+      "desired_power_mean": 2.879105567932129,
+      "inter_stream_power_mean": 0.5284161567687988,
+      "interference_to_desired_ratio": 0.1835348320167104,
+      "interference_to_desired_ratio_db": -7.362815013459868,
+      "effective_sinr_db_mean": 2.5119130611419678,
+      "effective_sinr_db_p10": -0.786262571811676,
+      "cond_A_mean": 4.705543041229248,
+      "cond_A_p95": 12.34366226196289,
+      "noise_power_mean": 1.0009121894836426
+    },
+    "10": {
+      "desired_power_mean": 2.879105567932129,
+      "inter_stream_power_mean": 0.5284161567687988,
+      "interference_to_desired_ratio": 0.1835348320167104,
+      "interference_to_desired_ratio_db": -7.362815013459868,
+      "effective_sinr_db_mean": 5.532498836517334,
+      "effective_sinr_db_p10": 1.2084965705871582,
+      "cond_A_mean": 4.705543041229248,
+      "cond_A_p95": 12.34366226196289,
+      "noise_power_mean": 0.3165161907672882
+    },
+    "15": {
+      "desired_power_mean": 2.879105567932129,
+      "inter_stream_power_mean": 0.5284161567687988,
+      "interference_to_desired_ratio": 0.1835348320167104,
+      "interference_to_desired_ratio_db": -7.362815013459868,
+      "effective_sinr_db_mean": 7.486937046051025,
+      "effective_sinr_db_p10": 1.9063905477523804,
+      "cond_A_mean": 4.705543041229248,
+      "cond_A_p95": 12.34366226196289,
+      "noise_power_mean": 0.10009121894836426
+    },
+    "20": {
+      "desired_power_mean": 2.879105567932129,
+      "inter_stream_power_mean": 0.5284161567687988,
+      "interference_to_desired_ratio": 0.1835348320167104,
+      "interference_to_desired_ratio_db": -7.362815013459868,
+      "effective_sinr_db_mean": 8.55214786529541,
+      "effective_sinr_db_p10": 2.1781368255615234,
+      "cond_A_mean": 4.705543041229248,
+      "cond_A_p95": 12.34366226196289,
+      "noise_power_mean": 0.03165161982178688
+    },
+    "25": {
+      "desired_power_mean": 2.879105567932129,
+      "inter_stream_power_mean": 0.5284161567687988,
+      "interference_to_desired_ratio": 0.1835348320167104,
+      "interference_to_desired_ratio_db": -7.362815013459868,
+      "effective_sinr_db_mean": 9.039054870605469,
+      "effective_sinr_db_p10": 2.2670044898986816,
+      "cond_A_mean": 4.705543041229248,
+      "cond_A_p95": 12.34366226196289,
+      "noise_power_mean": 0.010009121149778366
+    },
+    "30": {
+      "desired_power_mean": 2.879105567932129,
+      "inter_stream_power_mean": 0.5284161567687988,
+      "interference_to_desired_ratio": 0.1835348320167104,
+      "interference_to_desired_ratio_db": -7.362815013459868,
+      "effective_sinr_db_mean": 9.228759765625,
+      "effective_sinr_db_p10": 2.2922630310058594,
+      "cond_A_mean": 4.705543041229248,
+      "cond_A_p95": 12.34366226196289,
+      "noise_power_mean": 0.003165162168443203
+    },
+    "35": {
+      "desired_power_mean": 2.879105567932129,
+      "inter_stream_power_mean": 0.5284161567687988,
+      "interference_to_desired_ratio": 0.1835348320167104,
+      "interference_to_desired_ratio_db": -7.362815013459868,
+      "effective_sinr_db_mean": 9.294832229614258,
+      "effective_sinr_db_p10": 2.3107683658599854,
+      "cond_A_mean": 4.705543041229248,
+      "cond_A_p95": 12.34366226196289,
+      "noise_power_mean": 0.0010009121615439653
+    },
+    "40": {
+      "desired_power_mean": 2.879105567932129,
+      "inter_stream_power_mean": 0.5284161567687988,
+      "interference_to_desired_ratio": 0.1835348320167104,
+      "interference_to_desired_ratio_db": -7.362815013459868,
+      "effective_sinr_db_mean": 9.316526412963867,
+      "effective_sinr_db_p10": 2.316732883453369,
+      "cond_A_mean": 4.705543041229248,
+      "cond_A_p95": 12.34366226196289,
+      "noise_power_mean": 0.00031651623430661857
+    }
+  },
+  "condition": {
+    "0": {
+      "mean_cond_A": 4.705543041229248,
+      "p95_cond_A": 12.34366226196289
+    },
+    "5": {
+      "mean_cond_A": 4.705543041229248,
+      "p95_cond_A": 12.34366226196289
+    },
+    "10": {
+      "mean_cond_A": 4.705543041229248,
+      "p95_cond_A": 12.34366226196289
+    },
+    "15": {
+      "mean_cond_A": 4.705543041229248,
+      "p95_cond_A": 12.34366226196289
+    },
+    "20": {
+      "mean_cond_A": 4.705543041229248,
+      "p95_cond_A": 12.34366226196289
+    },
+    "25": {
+      "mean_cond_A": 4.705543041229248,
+      "p95_cond_A": 12.34366226196289
+    },
+    "30": {
+      "mean_cond_A": 4.705543041229248,
+      "p95_cond_A": 12.34366226196289
+    },
+    "35": {
+      "mean_cond_A": 4.705543041229248,
+      "p95_cond_A": 12.34366226196289
+    },
+    "40": {
+      "mean_cond_A": 4.705543041229248,
+      "p95_cond_A": 12.34366226196289
+    }
+  }
+}
