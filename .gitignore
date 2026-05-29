@@ -9,4 +9,12 @@ logs*
 *.log
 *.npy
 *.npz
+!results/clip17_iq05_p2_cpe3/mumimo_lmmse_estimator.npz
+!results/clip17_iq05_p2_cpe3/mumimo_plain_lmmse_estimator.npz
+!results/clip30_iq05_p2_cpe3/mumimo_lmmse_estimator.npz
+!results/clip30_iq05_p2_cpe3/mumimo_plain_lmmse_estimator.npz
+!results/linear_iq05_p2_cpe3_v2/mumimo_lmmse_estimator.npz
+!results/linear_iq05_p2_cpe3_v2/mumimo_plain_lmmse_estimator.npz
+!results/linear_noiq/mumimo_lmmse_estimator.npz
+!results/linear_noiq/mumimo_plain_lmmse_estimator.npz
 *.csv
