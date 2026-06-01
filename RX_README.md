@@ -13,19 +13,19 @@ Output: checkpoints, train history CSVs, evaluation CSVs, plots, eval_summary.js
 ### Linear, No I/Q Impairment
 
 ```powershell
-python rx_mumimo_receiver.py --dataset-dir datasets/linear_noiq --result-dir results/linear_noiq --mode train-all --device cuda
+python rx_mumimo_receiver.py --dataset-dir datasets/linear_noiq --result-dir results/linear_noiq --mode train-all
 ```
 
 ### Clipping 3.0, I/Q 0.5 dB, Phase 2 deg, CPE 3 deg
 
 ```powershell
-python rx_mumimo_receiver.py --dataset-dir datasets/clip30_iq05_p2_cpe3 --result-dir results/clip30_iq05_p2_cpe3 --mode train-all --device cuda
+python rx_mumimo_receiver.py --dataset-dir datasets/clip30_iq05_p2_cpe3 --result-dir results/clip30_iq05_p2_cpe3 --mode train-all
 ```
 
 ### Clipping 1.7, I/Q 0.5 dB, Phase 2 deg, CPE 3 deg
 
 ```powershell
-python rx_mumimo_receiver.py --dataset-dir datasets/clip17_iq05_p2_cpe3 --result-dir results/clip17_iq05_p2_cpe3 --mode train-all --device cuda
+python rx_mumimo_receiver.py --dataset-dir datasets/clip17_iq05_p2_cpe3 --result-dir results/clip17_iq05_p2_cpe3 --mode train-all
 ```
 
 ## Receiver 흐름
@@ -62,9 +62,8 @@ CE output = WL-CE
 --lmmse-mode snr-binned
 ```
 
-최종 dataset 설정에서는 train/val frame이 `40 dB`이므로, training split에서
-`40 dB` WL-LMMSE bin을 fit합니다. Test SNR은 사용 가능한 bin 중 가장 가까운
-bin을 사용합니다.
+`snr-binned` 모드에서는 training split에 포함된 SNR별로 WL-LMMSE bin을
+fit합니다. Test SNR은 사용 가능한 bin 중 가장 가까운 bin을 사용합니다.
 
 Plain non-WL LMMSE estimator도 training split에서 fit하며, 이는 `LMMSE-MMSE`
 comparison baseline에 사용합니다.

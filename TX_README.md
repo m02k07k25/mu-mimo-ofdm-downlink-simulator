@@ -30,8 +30,9 @@ n_val_frames = 10000
 n_test_frames_per_snr = 10000
 ```
 
-CLI에서는 channel, RF, clipping 관련 설정만 바꿉니다. SNR과 frame 수는
-최종 실험 재현성을 위해 code 기본값으로 고정했습니다.
+기본값은 `environment_config.json`의 `tx_dataset`에서 관리합니다. SNR,
+frame 수, channel, RF, clipping 조건을 한곳에서 변경할 수 있습니다.
+필요한 경우 기존 CLI 인자로 일부 값을 개별 override할 수 있습니다.
 
 ## 최종 Dataset 생성 명령어
 

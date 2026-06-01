@@ -27,6 +27,12 @@ from mumimo_phy import (
     qam_modulate,
     rf_impairment_widely_linear_coefficients,
 )
+from environment_config import (
+    DEFAULT_ENVIRONMENT_CONFIG,
+    dataset_dir,
+    load_environment_config,
+    tx_defaults,
+)
 
 
 @dataclass
@@ -111,10 +117,21 @@ class MuMimoE2EConfig:
 
 
 def parse_args() -> argparse.Namespace:
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", type=str, default=str(DEFAULT_ENVIRONMENT_CONFIG))
+    config_args, _ = config_parser.parse_known_args()
+    environment = load_environment_config(config_args.config)
+
     parser = argparse.ArgumentParser(
         description="Generate raw end-to-end downlink MU-MIMO OFDM datasets."
     )
-    parser.add_argument("--out-dir", type=str, default="datasets/clip17_iq05_snr40")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=str(DEFAULT_ENVIRONMENT_CONFIG),
+        help="Shared environment JSON config. Individual CLI options override its values.",
+    )
+    parser.add_argument("--out-dir", type=str)
     parser.add_argument("--modulation", type=str, default="64QAM", choices=["16QAM", "64QAM"])
     parser.add_argument("--n-users", type=int, default=2)
     parser.add_argument("--n-tx", type=int, default=8)
@@ -162,6 +179,10 @@ def parse_args() -> argparse.Namespace:
         help="Receiver common phase rotation in degrees applied to pilot and data waveforms.",
     )
     parser.add_argument("--seed", type=int, default=7)
+    parser.set_defaults(
+        out_dir=str(dataset_dir(environment["dataset_name"])),
+        **tx_defaults(environment),
+    )
     return parser.parse_args()
 
 
@@ -695,12 +716,12 @@ def build_config(args: argparse.Namespace) -> MuMimoE2EConfig:
         carrier_freq_hz=float(args.carrier_freq_hz),
         antenna_spacing_lambda=float(args.antenna_spacing_lambda),
         scm_angle_spread_deg=float(args.scm_angle_spread_deg),
-        snr_train_db=MuMimoE2EConfig.snr_train_db,
-        snr_train_db_list=MuMimoE2EConfig.snr_train_db_list,
-        snr_test_db=MuMimoE2EConfig.snr_test_db,
-        n_train_frames=MuMimoE2EConfig.n_train_frames,
-        n_val_frames=MuMimoE2EConfig.n_val_frames,
-        n_test_frames_per_snr=MuMimoE2EConfig.n_test_frames_per_snr,
+        snr_train_db=float(args.snr_train_db_list[0]),
+        snr_train_db_list=tuple(float(x) for x in args.snr_train_db_list),
+        snr_test_db=tuple(float(x) for x in args.snr_test_db),
+        n_train_frames=int(args.n_train_frames),
+        n_val_frames=int(args.n_val_frames),
+        n_test_frames_per_snr=int(args.n_test_frames_per_snr),
         csit_error_var=float(args.csit_error_var),
         precoder_norm=str(args.precoder_norm),
         case=str(args.case),

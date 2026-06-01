@@ -18,36 +18,33 @@ from mumimo_phy import (
     qam_demodulate,
     rf_impairment_widely_linear_coefficients,
 )
-
-
-DEFAULT_CE_EPOCHS = 50
-DEFAULT_SD_EPOCHS = 100
-DEFAULT_BILSTM_EPOCHS = 100
-DEFAULT_BATCH_SIZE = 512
-DEFAULT_CE_LR = 1e-3
-DEFAULT_SD_LR = 1e-3
-DEFAULT_CE_LR_STEP = 25
-DEFAULT_SD_LR_STEP = 25
-DEFAULT_BILSTM_LR_STEP = 100
-DEFAULT_CE_LR_GAMMA = 0.5
-DEFAULT_SD_LR_GAMMA = 0.5
-DEFAULT_GROUP_SIZE = 8
-DEFAULT_HIDDEN_DIM = 256
-DEFAULT_CE_HIDDEN_DIM = 512
-DEFAULT_CE_DROPOUT = 0.05
-DEFAULT_BILSTM_HIDDEN_DIMS = (64, 32, 16)
-DEFAULT_LMMSE_RIDGE = 1e-6
-DEFAULT_SEED = 7
-DEFAULT_LOG_EVERY = 10
-TRAIN_ONLY_SNR_DB = 40.0
+from environment_config import (
+    DEFAULT_ENVIRONMENT_CONFIG,
+    dataset_dir as environment_dataset_dir,
+    load_environment_config,
+    result_dir as environment_result_dir,
+    rx_training_defaults,
+)
 
 
 def parse_args() -> argparse.Namespace:
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", type=str, default=str(DEFAULT_ENVIRONMENT_CONFIG))
+    config_args, _ = config_parser.parse_known_args()
+    environment = load_environment_config(config_args.config)
+    dataset_name = environment["dataset_name"]
+
     parser = argparse.ArgumentParser(
         description="Train and evaluate a raw end-to-end MU-MIMO ComNet OFDM receiver."
     )
-    parser.add_argument("--dataset-dir", type=str, default="datasets/clip17_iq05_snr40")
-    parser.add_argument("--result-dir", type=str, default="results/clip17_iq05_snr40_linearce_sdcompare")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=str(DEFAULT_ENVIRONMENT_CONFIG),
+        help="Shared environment JSON config. Individual CLI options override its values.",
+    )
+    parser.add_argument("--dataset-dir", type=str)
+    parser.add_argument("--result-dir", type=str)
     parser.add_argument(
         "--mode",
         type=str,
@@ -91,27 +88,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--eps", type=float, default=1e-8)
     parser.add_argument("--device", type=str, default="auto")
+    parser.set_defaults(
+        dataset_dir=str(environment_dataset_dir(dataset_name)),
+        result_dir=str(environment_result_dir(dataset_name)),
+    )
     args = parser.parse_args()
-    args.ce_epochs = DEFAULT_CE_EPOCHS
-    args.sd_epochs = DEFAULT_SD_EPOCHS
-    args.bilstm_epochs = DEFAULT_BILSTM_EPOCHS
-    args.batch_size = DEFAULT_BATCH_SIZE
-    args.ce_lr = DEFAULT_CE_LR
-    args.sd_lr = DEFAULT_SD_LR
-    args.bilstm_lr = DEFAULT_SD_LR
-    args.ce_lr_step = DEFAULT_CE_LR_STEP
-    args.sd_lr_step = DEFAULT_SD_LR_STEP
-    args.bilstm_lr_step = DEFAULT_BILSTM_LR_STEP
-    args.ce_lr_gamma = DEFAULT_CE_LR_GAMMA
-    args.sd_lr_gamma = DEFAULT_SD_LR_GAMMA
-    args.group_size = DEFAULT_GROUP_SIZE
-    args.hidden_dim = DEFAULT_HIDDEN_DIM
-    args.ce_hidden_dim = DEFAULT_CE_HIDDEN_DIM
-    args.ce_dropout = DEFAULT_CE_DROPOUT
-    args.bilstm_hidden_dims = DEFAULT_BILSTM_HIDDEN_DIMS
-    args.lmmse_ridge = DEFAULT_LMMSE_RIDGE
-    args.seed = DEFAULT_SEED
-    args.log_every = DEFAULT_LOG_EVERY
+    for key, value in rx_training_defaults(environment).items():
+        setattr(args, key, value)
     return args
 
 
@@ -391,28 +374,6 @@ def preprocess_split(
         ),
         "cond_A": np.asarray(raw.get("cond_A", np.zeros((n_frames, n_fft, n_users))), dtype=np.float32),
     }
-
-
-def filter_split_by_snr(
-    data: dict[str, np.ndarray],
-    target_snr_db: float,
-    *,
-    atol: float = 1e-4,
-) -> dict[str, np.ndarray]:
-    snr_db = np.asarray(data["snr_db"], dtype=np.float32).reshape(-1)
-    mask = np.isclose(snr_db, float(target_snr_db), atol=float(atol))
-    if not np.any(mask):
-        available = sorted(float(x) for x in np.unique(snr_db))
-        raise ValueError(f"No frames found for SNR={target_snr_db:g} dB. Available train SNRs: {available}")
-    n_frames = snr_db.shape[0]
-    filtered: dict[str, np.ndarray] = {}
-    for key, value in data.items():
-        if isinstance(value, np.ndarray) and value.shape[:1] == (n_frames,):
-            filtered[key] = value[mask]
-        else:
-            filtered[key] = value
-    print(f"[DATA] using SNR={target_snr_db:g} dB only for training/validation: {int(np.sum(mask))}/{n_frames} frames")
-    return filtered
 
 
 def ce_feature_dim(cfg: dict[str, Any], ce_target: str = "pre-rf") -> int:
@@ -992,7 +953,6 @@ def get_lmmse_weight(
         )
     train_path = find_one(dataset_dir, "train_snr*.npz")
     train_data = preprocess_split(load_npz(train_path), cfg, float(args.eps), ce_target)
-    train_data = filter_split_by_snr(train_data, TRAIN_ONLY_SNR_DB)
     print(f"[FIT] empirical MU-MIMO {label} channel estimator (mode={lmmse_mode}, split=train)")
     estimator = fit_lmmse_estimator(train_data, float(args.lmmse_ridge), lmmse_mode)
     save_lmmse_weight(checkpoint_path, estimator, cfg, float(args.lmmse_ridge), ce_target)
@@ -1452,8 +1412,7 @@ def train_bilstm_sd(
     )
     x_val = torch.from_numpy(x_val_np).to(device)
     y_val = torch.from_numpy(y_val_np).to(device)
-    lr = float(args.bilstm_lr) if args.bilstm_lr is not None else float(args.sd_lr)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=float(args.sd_lr))
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer,
         step_size=max(1, int(args.bilstm_lr_step)),
@@ -2158,8 +2117,6 @@ def main() -> int:
         val_path = find_one(dataset_dir, "val_snr*.npz")
         train_data = preprocess_split(load_npz(train_path), cfg, float(args.eps), str(args.ce_target))
         val_data = preprocess_split(load_npz(val_path), cfg, float(args.eps), str(args.ce_target))
-        train_data = filter_split_by_snr(train_data, TRAIN_ONLY_SNR_DB)
-        val_data = filter_split_by_snr(val_data, TRAIN_ONLY_SNR_DB)
         ce_model = train_ce(
             cfg=cfg,
             train_data=train_data,
@@ -2184,8 +2141,6 @@ def main() -> int:
         val_path = find_one(dataset_dir, "val_snr*.npz")
         train_data = preprocess_split(load_npz(train_path), cfg, float(args.eps), str(args.ce_target))
         val_data = preprocess_split(load_npz(val_path), cfg, float(args.eps), str(args.ce_target))
-        train_data = filter_split_by_snr(train_data, TRAIN_ONLY_SNR_DB)
-        val_data = filter_split_by_snr(val_data, TRAIN_ONLY_SNR_DB)
         bilstm_model = train_bilstm_sd(
             cfg=cfg,
             train_data=train_data,

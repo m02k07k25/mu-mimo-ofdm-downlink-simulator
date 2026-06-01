@@ -18,3 +18,4 @@ logs*
 !results/linear_noiq/mumimo_lmmse_estimator.npz
 !results/linear_noiq/mumimo_plain_lmmse_estimator.npz
 *.csv
+AGENTS.*

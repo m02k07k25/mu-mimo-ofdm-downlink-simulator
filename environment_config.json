@@ -1,0 +1,76 @@
+{
+  "dataset_name": "clip17_iq05_p2_cpe3_test",
+  "case": "clipping",
+  "clip_ratio": 1.7,
+  "rx_iq_gain_imbalance_db": 0.5,
+  "rx_iq_phase_error_deg": 2.0,
+  "rx_common_phase_error_deg": 3.0,
+  "tx_dataset": {
+    "modulation": "64QAM",
+    "n_users": 2,
+    "n_streams": 2,
+    "n_tx": 8,
+    "n_rx_per_ue": 4,
+    "n_fft": 64,
+    "n_cp": 16,
+    "n_taps": 7,
+    "n_rays_per_path": 15,
+    "pdp_decay": 5.0,
+    "carrier_freq_hz": 800000000.0,
+    "antenna_spacing_lambda": 0.5,
+    "scm_angle_spread_deg": 3.0,
+    "channel_model": "SCM-style geometric clustered channel",
+    "csit_error_var": 0.001,
+    "precoder_norm": "column",
+    "pilot_kind": "qpsk",
+    "snr_train_db_list": [
+      40
+    ],
+    "snr_test_db": [
+      0,
+      5,
+      10,
+      15,
+      20,
+      25,
+      30,
+      35,
+      40
+    ],
+    "n_train_frames": 50000,
+    "n_val_frames": 10000,
+    "n_test_frames_per_snr": 10000,
+    "seed": 7
+  },
+  "demo": {
+    "model_name": "clip17_iq05_p2_cpe3"
+  },
+  "training": {
+    "common": {
+      "batch_size": 512,
+      "lmmse_ridge": 0.000001,
+      "seed": 7,
+      "log_every": 10
+    },
+    "ce": {
+      "epochs": 50,
+      "learning_rate": 0.001,
+      "lr_step": 25,
+      "lr_gamma": 0.5,
+      "hidden_dim": 512,
+      "dropout": 0.05
+    },
+    "sd": {
+      "epochs": 100,
+      "learning_rate": 0.001,
+      "lr_step": 100,
+      "lr_gamma": 0.5,
+      "group_size": 8,
+      "bilstm_hidden_dims": [
+        64,
+        32,
+        16
+      ]
+    }
+  }
+}

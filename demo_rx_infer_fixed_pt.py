@@ -3,77 +3,82 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
+from environment_config import (
+    DEFAULT_ENVIRONMENT_CONFIG,
+    dataset_dir,
+    load_environment_config,
+    result_dir,
+)
 
 ROOT = Path(__file__).resolve().parent
 RX_SCRIPT = ROOT / "rx_mumimo_receiver.py"
 
-FIXED_MODEL_DIR = ROOT / "datasets" / "clip17_iq05_p2_cpe3"
-FIXED_RESULT_DIR = ROOT / "results" / "clip17_iq05_p2_cpe3"
-DEFAULT_DATASET_DIR = ROOT / "datasets" / "demo_clip17_iq05_p2_cpe3"
-DEFAULT_RESULT_DIR = ROOT / "results" / "demo_clip17_iq05_p2_cpe3"
-CE_CHECKPOINT = FIXED_RESULT_DIR / "mumimo_ce_linear.pt"
-BILSTM_CHECKPOINT = FIXED_RESULT_DIR / "mumimo_wl_zf_bilstm.pt"
-LMMSE_CHECKPOINT = FIXED_RESULT_DIR / "mumimo_lmmse_estimator.npz"
-PLAIN_LMMSE_CHECKPOINT = FIXED_RESULT_DIR / "mumimo_plain_lmmse_estimator.npz"
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run fixed-condition demo inference with trained checkpoints."
+        description="Run demo inference using the model selected in the environment JSON config."
     )
     parser.add_argument(
-        "--device",
+        "--config",
         type=str,
-        default="auto",
-        help="Torch device passed to rx_mumimo_receiver.py. Default: auto.",
+        default=str(DEFAULT_ENVIRONMENT_CONFIG),
+        help="Shared environment JSON config.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    environment = load_environment_config(args.config)
+    demo_dataset_dir = dataset_dir(environment["dataset_name"], demo=True)
+    demo_result_dir = result_dir(environment["dataset_name"], demo=True)
+    model_result_dir = result_dir(environment["demo"]["model_name"])
+    ce_checkpoint = model_result_dir / "mumimo_ce_linear.pt"
+    bilstm_checkpoint = model_result_dir / "mumimo_wl_zf_bilstm.pt"
+    lmmse_checkpoint = model_result_dir / "mumimo_lmmse_estimator.npz"
+    plain_lmmse_checkpoint = model_result_dir / "mumimo_plain_lmmse_estimator.npz"
     required_paths = (
-        FIXED_MODEL_DIR,
-        CE_CHECKPOINT,
-        BILSTM_CHECKPOINT,
-        LMMSE_CHECKPOINT,
-        PLAIN_LMMSE_CHECKPOINT,
+        demo_dataset_dir,
+        ce_checkpoint,
+        bilstm_checkpoint,
+        lmmse_checkpoint,
+        plain_lmmse_checkpoint,
     )
     missing_paths = [path for path in required_paths if not path.exists()]
     if missing_paths:
         missing = "\n".join(str(path) for path in missing_paths)
-        raise SystemExit(f"Missing fixed demo model/data path:\n{missing}")
+        raise SystemExit(f"Missing selected demo model/data path:\n{missing}")
 
-    DEFAULT_RESULT_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(PLAIN_LMMSE_CHECKPOINT, DEFAULT_RESULT_DIR / PLAIN_LMMSE_CHECKPOINT.name)
+    demo_result_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(plain_lmmse_checkpoint, demo_result_dir / plain_lmmse_checkpoint.name)
 
     cmd = [
         sys.executable,
         str(RX_SCRIPT),
+        "--config",
+        str(args.config),
         "--dataset-dir",
-        str(DEFAULT_DATASET_DIR),
+        str(demo_dataset_dir),
         "--result-dir",
-        str(DEFAULT_RESULT_DIR),
+        str(demo_result_dir),
         "--mode",
         "eval",
-        "--device",
-        str(args.device),
         "--ce-checkpoint",
-        str(CE_CHECKPOINT),
+        str(ce_checkpoint),
         "--bilstm-checkpoint",
-        str(BILSTM_CHECKPOINT),
+        str(bilstm_checkpoint),
         "--lmmse-checkpoint",
-        str(LMMSE_CHECKPOINT),
+        str(lmmse_checkpoint),
     ]
 
     print("Running:", " ".join(cmd))
     subprocess.run(cmd, cwd=ROOT, check=True)
-    print(f"Demo inference complete. Results: {DEFAULT_RESULT_DIR}")
+    print(f"Demo inference complete. Results: {demo_result_dir}")
 
 
 if __name__ == "__main__":
