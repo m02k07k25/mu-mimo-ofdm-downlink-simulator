@@ -125,8 +125,8 @@ def load_environment_config(path: str | Path) -> dict[str, Any]:
     _require_positive_number(sd, "lr_gamma")
     _require_positive_int(sd, "group_size")
     hidden_dims = sd.get("bilstm_hidden_dims")
-    if not isinstance(hidden_dims, list) or not hidden_dims:
-        raise ValueError("training.sd.bilstm_hidden_dims must be a non-empty list")
+    if not isinstance(hidden_dims, list) or len(hidden_dims) != 3:
+        raise ValueError("training.sd.bilstm_hidden_dims must contain three values")
     for hidden_dim in hidden_dims:
         if not isinstance(hidden_dim, int) or isinstance(hidden_dim, bool) or hidden_dim <= 0:
             raise ValueError("training.sd.bilstm_hidden_dims values must be positive integers")
