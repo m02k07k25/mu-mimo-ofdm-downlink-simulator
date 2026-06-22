@@ -1,111 +1,149 @@
 # TX Dataset Generator
 
-`tx_mumimo_e2e_dataset.py`는 raw UE antenna-domain MU-MIMO OFDM dataset을
-compressed `.npz` 파일로 생성합니다. CE/SD neural model은 여기서 만들지
-않고, `rx_mumimo_receiver.py`에서 학습합니다.
+`tx_mumimo_e2e_dataset.py`는 raw UE antenna-domain MU-MIMO OFDM 데이터셋을
+compressed `.npz` 파일로 생성한다. TX 스크립트는 neural model을 학습하지 않고,
+CE/SD 학습과 평가는 `rx_mumimo_receiver.py`에서 수행한다.
 
-## 현재 기본 설정
+## 설정 기준
 
-Script 기본값은 최종 제출용 실험군에 맞춰져 있습니다.
+일반 실행은 프로젝트 루트의 `environment_config.json`을 먼저 읽고, 그 값을
+argparse 기본값으로 주입한다. 따라서 `python tx_mumimo_e2e_dataset.py`는 코드
+안의 순수 CLI 기본값이 아니라 `environment_config.json` 기준으로 실행된다.
+필요하면 CLI 인자로 개별 값을 override할 수 있다.
 
-```text
-modulation = 64QAM
-n_users = 2
-n_streams = 2
-n_tx = 8
-n_rx_per_ue = 4
-n_fft = 64
-n_cp = 16
-n_taps = 7
-n_rays_per_path = 15
-pdp_decay = 5.0
-channel_model = SCM-style geometric clustered channel
-csit_error_var = 0.001
-precoder_norm = column
-pilot_kind = qpsk
-train_snr_db_list = 40
-test_snr_db = 0 5 10 15 20 25 30 35 40
-n_train_frames = 50000
-n_val_frames = 10000
-n_test_frames_per_snr = 10000
-```
+현재 `environment_config.json`의 `dataset_name`은 `clip17_iq05_p2_cpe3_test`다.
+기존 최종 결과 폴더인 `datasets/clip17_iq05_p2_cpe3`와
+`results/clip17_iq05_p2_cpe3`는 같은 물리 조건의 clipping 1.7 실험이다.
 
-기본값은 `environment_config.json`의 `tx_dataset`에서 관리합니다. SNR,
-frame 수, channel, RF, clipping 조건을 한곳에서 변경할 수 있습니다.
-필요한 경우 기존 CLI 인자로 일부 값을 개별 override할 수 있습니다.
+## 최종 실험 조건
 
-## 최종 Dataset 생성 명령어
+| 항목 | 값 |
+|---|---:|
+| modulation | 64QAM |
+| users / streams | 2 / 2 |
+| TX antennas | 8 |
+| RX antennas per UE | 4 |
+| FFT / CP | 64 / 16 |
+| channel | SCM-style geometric clustered channel |
+| taps / rays per path | 7 / 15 |
+| PDP decay | 5.0 |
+| carrier frequency | 800 MHz |
+| antenna spacing | 0.5 lambda |
+| SCM angle spread | 3 deg |
+| CSIT error variance | 0.001 |
+| precoder norm | column |
+| pilot kind | qpsk |
+| train SNR | 40 dB |
+| test SNRs | 0, 5, 10, 15, 20, 25, 30, 35, 40 dB |
+| train / val / test frames | 50000 / 10000 / 10000 per SNR |
+| impairment case | clipping |
+| clip ratio | 1.7 |
+| RX I/Q gain imbalance | 0.5 dB |
+| RX I/Q phase error | 2 deg |
+| RX common phase error | 3 deg |
+| seed | 7 |
 
-### Linear, No I/Q Impairment
+## 대표 명령어
+
+`environment_config.json` 기준으로 생성:
 
 ```powershell
-python tx_mumimo_e2e_dataset.py --out-dir datasets/linear_noiq --case linear --rx-iq-gain-imbalance-db 0 --rx-iq-phase-error-deg 0 --rx-common-phase-error-deg 0
+python tx_mumimo_e2e_dataset.py
 ```
 
-### Clipping 3.0, I/Q 0.5 dB, Phase 2 deg, CPE 3 deg
+기존 최종 폴더 이름으로 clipping 1.7 데이터셋을 명시 생성:
+
+```powershell
+python tx_mumimo_e2e_dataset.py --out-dir datasets/clip17_iq05_p2_cpe3 --case clipping --clip-ratio 1.7 --rx-iq-gain-imbalance-db 0.5 --rx-iq-phase-error-deg 2 --rx-common-phase-error-deg 3
+```
+
+clipping 3.0 비교 데이터셋:
 
 ```powershell
 python tx_mumimo_e2e_dataset.py --out-dir datasets/clip30_iq05_p2_cpe3 --case clipping --clip-ratio 3.0 --rx-iq-gain-imbalance-db 0.5 --rx-iq-phase-error-deg 2 --rx-common-phase-error-deg 3
 ```
 
-### Clipping 1.7, I/Q 0.5 dB, Phase 2 deg, CPE 3 deg
+linear no-I/Q 비교 데이터셋:
 
 ```powershell
-python tx_mumimo_e2e_dataset.py --out-dir datasets/clip17_iq05_p2_cpe3 --case clipping --clip-ratio 1.7 --rx-iq-gain-imbalance-db 0.5 --rx-iq-phase-error-deg 2 --rx-common-phase-error-deg 3
+python tx_mumimo_e2e_dataset.py --out-dir datasets/linear_noiq --case linear --rx-iq-gain-imbalance-db 0 --rx-iq-phase-error-deg 0 --rx-common-phase-error-deg 0
+```
+
+데모용 test-only 데이터셋:
+
+```powershell
+python demo_tx_make_data.py
 ```
 
 ## 생성 흐름
 
 ```text
 random bits
--> Gray QAM symbols
+-> Gray-coded QAM symbols
 -> SCM-style multiuser multipath channel
--> strongest path angle selection
+-> strongest-path angle selection
 -> analog TX/RX steering beams
 -> H_tx_est = H_true + CSIT error
 -> per-subcarrier digital ZF precoder
--> OFDM IFFT / optional clipping / CP insertion
+-> OFDM IFFT
+-> optional BS time-domain clipping
+-> CP insertion
 -> multipath MIMO channel
 -> receiver RF impairment
 -> AWGN
 -> train/val/test .npz files
 ```
 
-## Channel 및 RF model
+## 주요 모델링
 
 ### CSIT Error
 
-Transmitter는 imperfect channel estimate로 precoder를 설계합니다.
+TX precoder는 완전한 channel이 아니라 noisy channel estimate로 설계된다.
 
 ```text
 H_tx_est = H_true + E
 E[|E|^2] = csit_error_var
 ```
 
-최종 실험에서는 `csit_error_var=0.001`을 사용합니다.
+최종 실험에서는 `csit_error_var=0.001`을 사용한다.
 
 ### Clipping
 
-`--case clipping`이면 BS antenna별 OFDM time-domain symbol을 cyclic-prefix
-삽입 전에 clipping합니다.
+`case=clipping`이면 BS antenna별 time-domain OFDM symbol을 CP 삽입 전에
+clipping한다.
 
 ```text
 threshold = clip_ratio * RMS(time_symbol)
 ```
 
-### Receiver I/Q Impairment
+최종 clipping 1.7 실험에서는 `clip_ratio=1.7`이다.
 
-RF impairment는 multipath channel 이후, AWGN 이전에 적용합니다.
+### Receiver RF Impairment
+
+RX I/Q imbalance와 common phase error는 multipath channel 이후, AWGN 이전에
+적용된다.
 
 ```text
 y_rf = alpha * y + beta * conj(y)
 ```
 
-이 때문에 RX에서는 widely-linear `(A, B)` channel representation을 사용합니다.
+이 때문에 RX에서는 일반 complex-linear channel만으로는 충분하지 않고,
+widely-linear `(A, B)` representation을 사용한다.
+
+### AWGN and SNR
+
+각 frame의 noise power는 clean received data waveform 기준으로 정해진다.
+
+```text
+sigma2 = mean(|clean received data waveform|^2) / 10^(snr_db/10)
+noise = sqrt(sigma2/2) * (n_re + j*n_im)
+```
+
+test split은 SNR별로 같은 base frame을 공유하고 AWGN scale만 바뀐다.
 
 ## 출력 파일
 
-기본 `40 dB` train/val 설정에서는 다음 파일이 생성됩니다.
+일반 40 dB train/val 설정에서는 다음 파일이 생성된다.
 
 ```text
 config.json
@@ -117,7 +155,7 @@ test_snr05.npz
 test_snr40.npz
 ```
 
-## Dataset 배열
+## 주요 배열
 
 ```text
 rx_p_time              complex64 [frames, streams, users, rx, time_len]
@@ -143,4 +181,5 @@ mean_cond_A            float32   [frames]
 p95_cond_A             float32   [frames]
 ```
 
-`time_len = n_fft + n_cp`입니다. 단, `case=cp_removal`일 때는 `time_len = n_fft`입니다.
+`linear`와 `clipping`에서는 `time_len = n_fft + n_cp`다. `cp_removal` case에서는
+CP를 붙이지 않으므로 `time_len = n_fft`다.
